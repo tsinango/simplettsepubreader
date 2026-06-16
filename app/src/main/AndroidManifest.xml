@@ -12,7 +12,6 @@
     <application
         android:name=".ReaderApplication"
         android:allowBackup="true"
-        android:icon="@mipmap/ic_launcher"
         android:label="TTS Reader"
         android:supportsRtl="true"
         android:theme="@style/Theme.EpubReader">
