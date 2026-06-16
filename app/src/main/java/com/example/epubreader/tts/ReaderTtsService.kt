@@ -19,6 +19,7 @@ import com.example.epubreader.MainActivity
 import com.example.epubreader.ReaderApplication
 import com.example.epubreader.data.ParsedBook
 import com.example.epubreader.data.ReaderRepository
+import com.example.epubreader.data.ReadingLocatorEntity
 import com.example.epubreader.data.SentenceRef
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -36,9 +37,16 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private var initialized = false
     private var playing = false
     private var bookId: String? = null
+    private var loadedBookId: String? = null
     private var parsed: ParsedBook? = null
-    private var queue: List<SentenceRef> = emptyList()
-    private var index = 0
+    private var chapterIndex = 0
+    private var chapterSentences: List<SentenceRef> = emptyList()
+    private var sentenceIndex = 0
+    private var utteranceSerial = 0
+    private var currentUtteranceId: String? = null
+    private var lastSavedKey: String? = null
+    private var lastBroadcastState: String? = null
+    private var hasAudioFocus = false
     private val audioFocusRequest by lazy {
         AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
             .setAudioAttributes(
@@ -60,15 +68,18 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         createChannel()
         tts = TextToSpeech(this, this)
         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) = Unit
+            override fun onStart(utteranceId: String?) {
+                broadcastState()
+            }
             override fun onError(utteranceId: String?) {
                 playing = false
+                broadcastState()
                 updateNotification("朗读遇到错误，位置已保存")
             }
             override fun onDone(utteranceId: String?) {
                 scope.launch {
-                    index++
-                    if (playing) speakCurrent()
+                    if (!playing || utteranceId != currentUtteranceId) return@launch
+                    if (moveIndex(1)) speakCurrent() else stopPlayback()
                 }
             }
         })
@@ -84,6 +95,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
             ACTION_PAUSE -> pause()
             ACTION_NEXT -> scope.launch { move(1) }
             ACTION_PREVIOUS -> scope.launch { move(-1) }
+            ACTION_SETTINGS_CHANGED -> scope.launch { reloadSettings() }
             ACTION_STOP -> stopPlayback()
         }
         return START_NOT_STICKY
@@ -100,6 +112,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
             languageStatus != TextToSpeech.ERROR
         if (!initialized) {
             playing = false
+            broadcastState()
             updateNotification("系统朗读引擎不可用")
         } else if (playing) {
             scope.launch { applySettings(); speakCurrent() }
@@ -108,18 +121,60 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
 
     private suspend fun loadAndPlay() {
         val id = bookId ?: return
-        val book = repository.book(id) ?: return stopPlayback()
-        parsed = repository.parsed(book)
+        val parsedBook = ensureBook(id) ?: return stopPlayback()
         val locator = repository.locator(id)
-        queue = parsed!!.chapters.flatMap(repository::sentences)
-        index = queue.indexOfFirst {
-            it.chapterPath == locator?.chapterPath &&
-                it.paragraphIndex == locator.paragraphIndex &&
-                it.sentenceIndex == locator.sentenceIndex
-        }.coerceAtLeast(0)
+        positionFromLocator(parsedBook, locator)
         playing = true
         applySettings()
+        broadcastState()
         if (initialized) speakCurrent()
+    }
+
+    private suspend fun ensureBook(id: String): ParsedBook? {
+        if (loadedBookId == id && parsed != null) return parsed
+        val book = repository.book(id) ?: return null
+        val parsedBook = repository.parsed(book)
+        parsed = parsedBook
+        loadedBookId = id
+        chapterIndex = 0
+        sentenceIndex = 0
+        chapterSentences = emptyList()
+        lastSavedKey = null
+        lastBroadcastState = null
+        return parsedBook
+    }
+
+    private suspend fun positionFromLocator(parsedBook: ParsedBook, locator: ReadingLocatorEntity?) {
+        val locatedChapterIndex = parsedBook.chapters.indexOfFirst { it.path == locator?.chapterPath }
+            .coerceAtLeast(0)
+        if (!loadChapterAt(locatedChapterIndex)) {
+            loadNearestChapter(locatedChapterIndex, 1)
+        }
+        sentenceIndex = if (locator == null) {
+            0
+        } else {
+            chapterSentences.indexOfFirst {
+                it.paragraphIndex == locator.paragraphIndex && it.sentenceIndex == locator.sentenceIndex
+            }.coerceAtLeast(0)
+        }
+    }
+
+    private suspend fun loadChapterAt(index: Int): Boolean {
+        val chapter = parsed?.chapters?.getOrNull(index) ?: return false
+        chapterSentences = repository.sentences(chapter)
+        chapterIndex = index
+        sentenceIndex = sentenceIndex.coerceIn(chapterSentences.indicesOrZero())
+        return chapterSentences.isNotEmpty()
+    }
+
+    private suspend fun loadNearestChapter(startIndex: Int, direction: Int): Boolean {
+        val parsedBook = parsed ?: return false
+        var nextIndex = startIndex
+        while (nextIndex in parsedBook.chapters.indices) {
+            if (loadChapterAt(nextIndex)) return true
+            nextIndex += direction
+        }
+        return false
     }
 
     private suspend fun applySettings() {
@@ -131,45 +186,120 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
+    private suspend fun reloadSettings() {
+        applySettings()
+        if (playing && initialized) speakCurrent()
+    }
+
     private suspend fun speakCurrent() {
         val id = bookId ?: return
-        val sentence = queue.getOrNull(index) ?: return stopPlayback()
-        if (audioManager.requestAudioFocus(audioFocusRequest) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+        val sentence = chapterSentences.getOrNull(sentenceIndex) ?: return stopPlayback()
+        if (!ensureAudioFocus()) {
             playing = false
+            broadcastState()
             return updateNotification("等待音频控制权")
         }
-        repository.saveProgress(id, sentence, "TTS")
+        val sentenceKey = sentence.key()
+        if (lastSavedKey != sentenceKey) {
+            repository.saveProgress(id, sentence, "TTS")
+            lastSavedKey = sentenceKey
+        }
+        broadcastState()
         updateNotification(sentence.text.take(80))
-        tts?.speak(sentence.text, TextToSpeech.QUEUE_FLUSH, null, utteranceId(sentence))
+        val utteranceId = nextUtteranceId(sentence)
+        currentUtteranceId = utteranceId
+        tts?.speak(sentence.text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
     }
 
     private fun pause() {
         playing = false
         tts?.stop()
-        audioManager.abandonAudioFocusRequest(audioFocusRequest)
+        currentUtteranceId = null
+        abandonAudioFocus()
+        broadcastState()
         updateNotification("已暂停")
     }
 
     private suspend fun move(delta: Int) {
-        if (queue.isEmpty()) {
+        if (chapterSentences.isEmpty()) {
             loadAndPlay()
             return
         }
-        index = (index + delta).coerceIn(queue.indices)
+        if (!moveIndex(delta)) return
         playing = true
         speakCurrent()
+    }
+
+    private suspend fun moveIndex(delta: Int): Boolean {
+        val localIndex = sentenceIndex + delta
+        if (localIndex in chapterSentences.indices) {
+            sentenceIndex = localIndex
+            return true
+        }
+        val direction = delta.sign()
+        val targetChapter = chapterIndex + direction
+        if (!loadNearestChapter(targetChapter, direction)) return false
+        sentenceIndex = if (delta > 0) 0 else chapterSentences.lastIndex
+        return true
     }
 
     private fun stopPlayback() {
         playing = false
         tts?.stop()
-        audioManager.abandonAudioFocusRequest(audioFocusRequest)
+        currentUtteranceId = null
+        abandonAudioFocus()
+        broadcastState()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
+    private fun ensureAudioFocus(): Boolean {
+        if (hasAudioFocus) return true
+        hasAudioFocus = audioManager.requestAudioFocus(audioFocusRequest) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        return hasAudioFocus
+    }
+
+    private fun abandonAudioFocus() {
+        if (!hasAudioFocus) return
+        audioManager.abandonAudioFocusRequest(audioFocusRequest)
+        hasAudioFocus = false
+    }
+
     private fun utteranceId(ref: SentenceRef) =
-        "${ref.chapterPath}:${ref.paragraphIndex}:${ref.sentenceIndex}"
+        ref.key()
+
+    private fun nextUtteranceId(ref: SentenceRef): String {
+        utteranceSerial++
+        return "${utteranceId(ref)}:$utteranceSerial"
+    }
+
+    private fun SentenceRef.key() = "$chapterPath:$paragraphIndex:$sentenceIndex"
+
+    private fun Int.sign(): Int = when {
+        this > 0 -> 1
+        this < 0 -> -1
+        else -> 0
+    }
+
+    private fun List<SentenceRef>.indicesOrZero(): IntRange =
+        if (isEmpty()) 0..0 else indices
+
+    private fun broadcastState() {
+        val sentence = chapterSentences.getOrNull(sentenceIndex)
+        val stateKey = listOf(bookId, playing, sentence?.key()).joinToString("|")
+        if (stateKey == lastBroadcastState) return
+        lastBroadcastState = stateKey
+        val intent = Intent(ACTION_STATE_CHANGED)
+            .setPackage(packageName)
+            .putExtra(EXTRA_BOOK_ID, bookId)
+            .putExtra(EXTRA_PLAYING, playing)
+        if (sentence != null) {
+            intent.putExtra(EXTRA_CHAPTER_PATH, sentence.chapterPath)
+            intent.putExtra(EXTRA_PARAGRAPH_INDEX, sentence.paragraphIndex)
+            intent.putExtra(EXTRA_SENTENCE_INDEX, sentence.sentenceIndex)
+        }
+        sendBroadcast(intent)
+    }
 
     private fun notification(text: String): Notification {
         val open = PendingIntent.getActivity(
@@ -178,7 +308,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
-            .setContentTitle("安读")
+            .setContentTitle("TTS Reader")
             .setContentText(text)
             .setContentIntent(open)
             .setOngoing(playing)
@@ -227,7 +357,13 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         const val ACTION_NEXT = "reader.NEXT"
         const val ACTION_PREVIOUS = "reader.PREVIOUS"
         const val ACTION_STOP = "reader.STOP"
+        const val ACTION_SETTINGS_CHANGED = "reader.SETTINGS_CHANGED"
+        const val ACTION_STATE_CHANGED = "reader.STATE_CHANGED"
         const val EXTRA_BOOK_ID = "bookId"
+        const val EXTRA_PLAYING = "playing"
+        const val EXTRA_CHAPTER_PATH = "chapterPath"
+        const val EXTRA_PARAGRAPH_INDEX = "paragraphIndex"
+        const val EXTRA_SENTENCE_INDEX = "sentenceIndex"
         private const val CHANNEL_ID = "reader_tts"
         private const val NOTIFICATION_ID = 42
     }

@@ -10,6 +10,7 @@ import javax.xml.parsers.DocumentBuilderFactory
 import javax.xml.parsers.ParserConfigurationException
 
 class EpubParser {
+    private val whitespace = Regex("\\s+")
     private val factory = DocumentBuilderFactory.newInstance().apply {
         isNamespaceAware = true
         safeFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
@@ -47,7 +48,7 @@ class EpubParser {
             val document = Jsoup.parse(zip.getInputStream(entry), "UTF-8", "")
             document.select("script,style,nav").remove()
             val blocks = document.select("h1,h2,h3,h4,h5,h6,p,li,blockquote")
-                .map { it.text().replace(Regex("\\s+"), " ").trim() }
+                .map { it.text().replace(whitespace, " ").trim() }
                 .filter { it.isNotBlank() }
                 .ifEmpty {
                     document.body()?.text()?.trim()?.takeIf(String::isNotBlank)?.let(::listOf)

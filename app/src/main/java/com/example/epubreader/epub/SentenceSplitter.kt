@@ -5,9 +5,10 @@ import java.util.Locale
 
 object SentenceSplitter {
     private const val MAX_CHARS = 3500
+    private val whitespace = Regex("\\s+")
 
     fun split(text: String): List<String> {
-        val normalized = text.replace(Regex("\\s+"), " ").trim()
+        val normalized = text.replace(whitespace, " ").trim()
         if (normalized.isEmpty()) return emptyList()
         val iterator = BreakIterator.getSentenceInstance(Locale.getDefault())
         iterator.setText(normalized)

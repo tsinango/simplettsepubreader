@@ -19,18 +19,25 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -49,7 +56,6 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,15 +63,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.epubreader.data.ReaderSettingsEntity
+import com.example.epubreader.data.SentenceRef
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -81,8 +90,8 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun ReaderApp(vm: MainViewModel = viewModel()) {
-    val reader by vm.reader.collectAsState()
-    val settings by vm.settings.collectAsState()
+    val reader by vm.reader.collectAsStateWithLifecycle()
+    val settings by vm.settings.collectAsStateWithLifecycle()
     var currentBookId by remember { mutableStateOf<String?>(null) }
     val theme = settings?.theme ?: "SYSTEM"
     val dark = theme == "DARK" || (theme == "SYSTEM" && isSystemInDarkTheme())
@@ -102,12 +111,12 @@ private fun ReaderApp(vm: MainViewModel = viewModel()) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun LibraryScreen(vm: MainViewModel, onOpen: (String) -> Unit) {
-    val books by vm.books.collectAsState()
+    val books by vm.books.collectAsStateWithLifecycle()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) {
         it?.let(vm::import)
     }
     Scaffold(
-        topBar = { TopAppBar(title = { Text("安读") }) },
+        topBar = { TopAppBar(title = { Text("TTS Reader") }) },
         floatingActionButton = {
             FloatingActionButton(onClick = { picker.launch(arrayOf("application/epub+zip")) }) {
                 Icon(Icons.Default.Add, "导入 EPUB")
@@ -144,12 +153,13 @@ private fun ReaderScreen(
     settings: ReaderSettingsEntity,
     onBack: () -> Unit,
 ) {
-    val state by vm.reader.collectAsState()
+    val state by vm.reader.collectAsStateWithLifecycle()
     val chapter = state.parsed?.chapters?.getOrNull(state.chapterIndex)
-    val sentences = remember(chapter) { chapter?.let { (vm.getApplication() as ReaderApplication).repository.sentences(it) }.orEmpty() }
+    val sentences = state.sentences
     val listState = rememberLazyListState()
     var showContents by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var showSleepTimer by remember { mutableStateOf(false) }
     val lifecycle = LocalLifecycleOwner.current
 
     DisposableEffect(lifecycle) {
@@ -163,10 +173,18 @@ private fun ReaderScreen(
         }
     }
     LaunchedEffect(state.chapterIndex, state.sentenceIndex, sentences.size) {
-        if (sentences.isNotEmpty()) listState.scrollToItem(state.sentenceIndex.coerceIn(sentences.indices))
+        if (sentences.isEmpty()) return@LaunchedEffect
+        val target = state.sentenceIndex.coerceIn(sentences.indices)
+        if (!listState.isItemVisible(target)) {
+            if (state.isSpeaking) {
+                listState.scrollToItem(target)
+            } else {
+                listState.animateScrollToItem(target)
+            }
+        }
     }
     LaunchedEffect(listState.isScrollInProgress) {
-        if (!listState.isScrollInProgress && sentences.isNotEmpty()) {
+        if (!state.isSpeaking && !listState.isScrollInProgress && sentences.isNotEmpty()) {
             vm.visibleSentence((listState.firstVisibleItemIndex - 1).coerceIn(sentences.indices))
         }
     }
@@ -177,7 +195,7 @@ private fun ReaderScreen(
                 title = { Text(state.book?.title ?: "正在打开…", maxLines = 1) },
                 navigationIcon = {
                     IconButton(onClick = { vm.persistCurrent(); onBack() }) {
-                        Icon(Icons.Default.ArrowBack, "返回")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回")
                     }
                 },
                 actions = {
@@ -187,16 +205,16 @@ private fun ReaderScreen(
             )
         },
         bottomBar = {
-            Row(
-                Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainer)
-                    .padding(8.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-            ) {
-                IconButton(onClick = vm::previousSentence) { Text("上一句") }
-                IconButton(onClick = vm::play) { Icon(Icons.Default.PlayArrow, "朗读") }
-                IconButton(onClick = vm::pause) { Icon(Icons.Default.Pause, "暂停") }
-                IconButton(onClick = vm::nextSentence) { Text("下一句") }
-            }
+            ReaderBottomBar(
+                isSpeaking = state.isSpeaking,
+                sleepTimerText = sleepTimerLabel(state),
+                onPrevious = vm::previousSentence,
+                onPlayPause = vm::togglePlayPause,
+                onNext = vm::nextSentence,
+                onSleepTimer = {
+                    showSleepTimer = true
+                },
+            )
         },
     ) { padding ->
         LazyColumn(
@@ -213,13 +231,7 @@ private fun ReaderScreen(
                 Spacer(Modifier.height(10.dp))
             }
             itemsIndexed(sentences, key = { _, item -> "${item.paragraphIndex}:${item.sentenceIndex}" }) { index, item ->
-                Text(
-                    text = item.text,
-                    fontSize = settings.fontSize.sp,
-                    lineHeight = (settings.fontSize * settings.lineHeight).sp,
-                    color = if (index == state.sentenceIndex) MaterialTheme.colorScheme.primary else Color.Unspecified,
-                    modifier = Modifier.widthIn(max = 840.dp),
-                )
+                SentenceRow(item, index == state.sentenceIndex, settings)
             }
         }
     }
@@ -241,6 +253,144 @@ private fun ReaderScreen(
         )
     }
     if (showSettings) SettingsDialog(settings, vm::updateSettings) { showSettings = false }
+    if (showSleepTimer) {
+        SleepTimerDialog(
+            minutes = state.sleepTimerMinutes,
+            remainingMinutes = state.sleepTimerRemainingMinutes,
+            active = state.sleepTimerEndAtMillis != null,
+            onDecrease = { vm.adjustSleepTimer(-5) },
+            onIncrease = { vm.adjustSleepTimer(5) },
+            onStart = vm::startSleepTimer,
+            onCancel = vm::cancelSleepTimer,
+            onClose = { showSleepTimer = false },
+        )
+    }
+}
+
+private fun sleepTimerLabel(state: ReaderUiState): String =
+    state.sleepTimerRemainingMinutes?.let { "剩${it}分" } ?: "${state.sleepTimerMinutes}分"
+
+@Composable
+private fun ReaderBottomBar(
+    isSpeaking: Boolean,
+    sleepTimerText: String,
+    onPrevious: () -> Unit,
+    onPlayPause: () -> Unit,
+    onNext: () -> Unit,
+    onSleepTimer: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainer)
+            .padding(8.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ReaderControlButton("上一句", Icons.Default.SkipPrevious, onPrevious)
+        ReaderControlButton(
+            if (isSpeaking) "暂停" else "朗读",
+            if (isSpeaking) Icons.Default.Pause else Icons.Default.PlayArrow,
+            onPlayPause,
+        )
+        ReaderControlButton("下一句", Icons.Default.SkipNext, onNext)
+        ReaderControlButton(sleepTimerText, Icons.Default.Timer, onSleepTimer)
+    }
+}
+
+private fun LazyListState.isItemVisible(index: Int): Boolean {
+    val visible = layoutInfo.visibleItemsInfo
+    return visible.any { it.index == index + 1 }
+}
+
+@Composable
+private fun SentenceRow(
+    sentence: SentenceRef,
+    isCurrent: Boolean,
+    settings: ReaderSettingsEntity,
+) {
+    Text(
+        text = sentence.text,
+        fontSize = settings.fontSize.sp,
+        lineHeight = (settings.fontSize * settings.lineHeight).sp,
+        color = if (isCurrent) {
+            MaterialTheme.colorScheme.onPrimaryContainer
+        } else {
+            Color.Unspecified
+        },
+        modifier = Modifier
+            .widthIn(max = 840.dp)
+            .background(
+                if (isCurrent) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                RoundedCornerShape(6.dp),
+            )
+            .padding(8.dp),
+    )
+}
+
+@Composable
+private fun ReaderControlButton(
+    label: String,
+    icon: ImageVector,
+    onClick: () -> Unit,
+) {
+    Column(
+        modifier = Modifier.width(72.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        IconButton(onClick = onClick, modifier = Modifier.size(48.dp)) {
+            Icon(icon, label)
+        }
+        Text(label, fontSize = 11.sp, maxLines = 1)
+    }
+}
+
+@Composable
+private fun SleepTimerDialog(
+    minutes: Int,
+    remainingMinutes: Int?,
+    active: Boolean,
+    onDecrease: () -> Unit,
+    onIncrease: () -> Unit,
+    onStart: () -> Unit,
+    onCancel: () -> Unit,
+    onClose: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("睡眠 Timer") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(if (active) "剩余 ${remainingMinutes ?: minutes} 分钟" else "定时 $minutes 分钟")
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Button(onClick = onDecrease) { Text("-5") }
+                    Text("$minutes 分钟", fontWeight = FontWeight.Bold)
+                    Button(onClick = onIncrease) { Text("+5") }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = {
+                onStart()
+                onClose()
+            }) {
+                Text(if (active) "重置" else "开启")
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (active) {
+                    TextButton(onClick = {
+                        onCancel()
+                        onClose()
+                    }) { Text("关闭") }
+                }
+                TextButton(onClick = onClose) { Text("取消") }
+            }
+        },
+    )
 }
 
 @Composable
