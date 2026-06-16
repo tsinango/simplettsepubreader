@@ -25,7 +25,7 @@ jobs:
       - name: Generate Gradle Wrapper if missing
         run: |
           if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
-            gradle wrapper --gradle-version 8.7
+            gradle wrapper --gradle-version 8.13
           fi
 
       - name: Make gradlew executable
