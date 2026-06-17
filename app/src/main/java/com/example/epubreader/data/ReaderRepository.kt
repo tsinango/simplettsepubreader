@@ -21,6 +21,7 @@ class ReaderRepository(
     private val cacheLock = Any()
     private val parsedCache = lruCache<String, ParsedBook>(3)
     private val sentenceCache = lruCache<String, List<SentenceRef>>(48)
+    private val progressIndexCache = lruCache<String, BookProgressIndex>(3)
     private var lastSavedLocatorKey: String? = null
     val books: Flow<List<BookEntity>> = dao.books()
     val locators: Flow<List<ReadingLocatorEntity>> = dao.locators()
@@ -125,18 +126,15 @@ class ReaderRepository(
         chapterIndex: Int,
         sentenceIndex: Int,
     ): Int {
-        val total = parsed.chapters.sumOf { cachedSentences(it).size }
-        if (total <= 0) return 0
+        val index = progressIndex(parsed)
+        if (index.total <= 0) return 0
+        val safeChapterIndex = chapterIndex.coerceIn(0, parsed.chapters.lastIndex)
+        val currentCount = index.chapterCounts.getOrElse(safeChapterIndex) { 0 }
+        val completedBeforeChapter = index.completedBeforeChapter.getOrElse(safeChapterIndex) { 0 }
+        if (currentCount <= 0) return percentFromIndex(completedBeforeChapter, index.total)
 
-        val completedBeforeChapter = parsed.chapters
-            .take(chapterIndex.coerceIn(0, parsed.chapters.lastIndex + 1))
-            .sumOf { cachedSentences(it).size }
-        val currentChapter = parsed.chapters.getOrNull(chapterIndex) ?: return 0
-        val currentSentences = cachedSentences(currentChapter)
-        if (currentSentences.isEmpty()) return percentFromIndex(completedBeforeChapter, total)
-
-        val globalIndex = completedBeforeChapter + sentenceIndex.coerceIn(currentSentences.indices)
-        return percentFromIndex(globalIndex, total)
+        val globalIndex = completedBeforeChapter + sentenceIndex.coerceIn(0, currentCount - 1)
+        return percentFromIndex(globalIndex, index.total)
     }
 
     fun progressPercent(parsed: ParsedBook, locator: ReadingLocatorEntity?): Int {
@@ -166,6 +164,22 @@ class ReaderRepository(
             parsedCache[bookId] = parsed
         }
     }
+
+    private fun progressIndex(parsed: ParsedBook): BookProgressIndex {
+        val key = progressIndexKey(parsed)
+        synchronized(cacheLock) { progressIndexCache[key] }?.let { return it }
+        val chapterCounts = parsed.chapters.map { cachedSentences(it).size }
+        var runningTotal = 0
+        val completedBeforeChapter = chapterCounts.map { count ->
+            runningTotal.also { runningTotal += count }
+        }
+        val index = BookProgressIndex(chapterCounts, completedBeforeChapter, runningTotal)
+        synchronized(cacheLock) { progressIndexCache[key] = index }
+        return index
+    }
+
+    private fun progressIndexKey(parsed: ParsedBook): String =
+        "${parsed.title}:${parsed.author}:${parsed.chapters.size}:${parsed.chapters.hashCode()}"
 
     private fun saveCover(bookId: String, bookFile: File, cover: BookCover?): String? {
         cover ?: return null
@@ -211,4 +225,10 @@ class ReaderRepository(
         "${chapter.path}:${chapter.paragraphs.hashCode()}"
 
     private fun SentenceRef.key() = "$chapterPath:$paragraphIndex:$sentenceIndex"
+
+    private data class BookProgressIndex(
+        val chapterCounts: List<Int>,
+        val completedBeforeChapter: List<Int>,
+        val total: Int,
+    )
 }

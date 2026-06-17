@@ -86,6 +86,7 @@ import com.example.epubreader.data.ReaderSettingsEntity
 import com.example.epubreader.data.SentenceRef
 import java.io.File
 import java.util.Locale
+import kotlinx.coroutines.flow.distinctUntilChanged
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -241,6 +242,7 @@ private fun ReaderScreen(
     onBack: () -> Unit,
 ) {
     val state by vm.reader.collectAsStateWithLifecycle()
+    val position by vm.readerPosition.collectAsStateWithLifecycle()
     val readingItems = remember(
         state.previousChapterIndex,
         state.previousSentences,
@@ -251,8 +253,8 @@ private fun ReaderScreen(
     ) {
         readingListItems(state)
     }
-    val currentItemIndex = remember(readingItems, state.chapterIndex, state.sentenceIndex) {
-        readingItems.currentSentenceItemIndex(state)
+    val currentItemIndex = remember(readingItems, position.chapterIndex, position.sentenceIndex) {
+        readingItems.currentSentenceItemIndex(position)
     }
     val listState = remember(state.book?.id) {
         LazyListState(
@@ -282,43 +284,35 @@ private fun ReaderScreen(
         vm.persistCurrent()
         onBack()
     }
-    LaunchedEffect(state.chapterIndex, state.sentenceIndex, readingItems.size, state.isSpeaking) {
+    LaunchedEffect(position.chapterIndex, position.sentenceIndex, readingItems.size, position.isSpeaking) {
         if (currentItemIndex < 0) return@LaunchedEffect
-        if ((state.isSpeaking || !listState.isScrollInProgress) && !listState.isItemVisible(currentItemIndex)) {
+        if ((position.isSpeaking || !listState.isScrollInProgress) && !listState.isItemVisible(currentItemIndex)) {
             listState.scrollToItem(currentItemIndex)
         }
     }
 
-    LaunchedEffect(listState, readingItems, state.isSpeaking) {
+    LaunchedEffect(listState, readingItems, position.isSpeaking, position.chapterIndex) {
         snapshotFlow {
-            listState.layoutInfo.visibleItemsInfo
-                .asSequence()
-                .mapNotNull { readingItems.getOrNull(it.index) as? ReadingListItem.Sentence }
-                .firstOrNull()
-        }.collect { visibleSentence ->
-            if (state.isSpeaking || visibleSentence == null) return@collect
-            val currentChapterPath = state.parsed?.chapters?.getOrNull(state.chapterIndex)?.path
-            if (visibleSentence.sentence.chapterPath != currentChapterPath) {
-                vm.visibleSentence(visibleSentence.sentence)
-            }
-        }
-    }
-
-    LaunchedEffect(listState, readingItems, state.isSpeaking) {
-        snapshotFlow { listState.isScrollInProgress }
-            .collect { isScrollInProgress ->
-                if (isScrollInProgress || state.isSpeaking) return@collect
-                val visibleSentence = listState.layoutInfo.visibleItemsInfo
+            VisibleSentenceSnapshot(
+                sentence = listState.layoutInfo.visibleItemsInfo
                     .asSequence()
                     .mapNotNull { readingItems.getOrNull(it.index) as? ReadingListItem.Sentence }
-                    .firstOrNull()
-                if (visibleSentence != null) {
-                    if (visibleSentence.chapterIndex == state.chapterIndex) {
-                        vm.visibleSentenceInCurrentChapter(visibleSentence.localSentenceIndex)
-                    } else {
-                        vm.visibleSentence(visibleSentence.sentence)
-                    }
+                    .firstOrNull(),
+                isScrollInProgress = listState.isScrollInProgress,
+            )
+        }.distinctUntilChanged().collect { visible ->
+            val visibleSentence = visible.sentence
+            if (position.isSpeaking || visibleSentence == null) return@collect
+            val currentChapterPath = state.parsed?.chapters?.getOrNull(position.chapterIndex)?.path
+            if (visibleSentence.sentence.chapterPath != currentChapterPath) {
+                vm.visibleSentence(visibleSentence.sentence)
+            } else if (!visible.isScrollInProgress) {
+                if (visibleSentence.chapterIndex == position.chapterIndex) {
+                    vm.visibleSentenceInCurrentChapter(visibleSentence.localSentenceIndex)
+                } else {
+                    vm.visibleSentence(visibleSentence.sentence)
                 }
+            }
         }
     }
 
@@ -343,8 +337,8 @@ private fun ReaderScreen(
         },
         bottomBar = {
             ReaderBottomBar(
-                isSpeaking = state.isSpeaking,
-                progress = state.progress,
+                isSpeaking = position.isSpeaking,
+                progress = position.progress,
                 sleepTimerText = sleepTimerLabel(state),
                 onPrevious = vm::previousSentence,
                 onPlayPause = vm::togglePlayPause,
@@ -366,12 +360,12 @@ private fun ReaderScreen(
         ) {
             itemsIndexed(readingItems, key = { _, item -> item.key }) { _, item ->
                 when (item) {
-                    is ReadingListItem.Header -> ChapterHeader(item.chapter.title, settings, state.progress)
+                    is ReadingListItem.Header -> ChapterHeader(item.chapter.title, settings, position.progress)
                     is ReadingListItem.Sentence -> SentenceRow(
                         item.sentence,
-                        state.isSpeaking &&
-                            item.chapterIndex == state.chapterIndex &&
-                            item.localSentenceIndex == state.sentenceIndex,
+                        position.isSpeaking &&
+                            item.chapterIndex == position.chapterIndex &&
+                            item.localSentenceIndex == position.sentenceIndex,
                         settings,
                     )
                 }
@@ -483,6 +477,11 @@ private fun LazyListState.isItemVisible(itemIndex: Int): Boolean {
     return visible.any { it.index == itemIndex }
 }
 
+private data class VisibleSentenceSnapshot(
+    val sentence: ReadingListItem.Sentence?,
+    val isScrollInProgress: Boolean,
+)
+
 private sealed class ReadingListItem {
     abstract val key: String
 
@@ -520,11 +519,11 @@ private fun readingListItems(state: ReaderUiState): List<ReadingListItem> {
     return items
 }
 
-private fun List<ReadingListItem>.currentSentenceItemIndex(state: ReaderUiState): Int =
+private fun List<ReadingListItem>.currentSentenceItemIndex(position: ReaderPositionState): Int =
     indexOfFirst {
         it is ReadingListItem.Sentence &&
-            it.chapterIndex == state.chapterIndex &&
-            it.localSentenceIndex == state.sentenceIndex
+            it.chapterIndex == position.chapterIndex &&
+            it.localSentenceIndex == position.sentenceIndex
     }
 
 @Composable
