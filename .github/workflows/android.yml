@@ -1,0 +1,53 @@
+name: Android Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      HAS_SIGNING_KEY: ${{ secrets.TTS_READER_KEYSTORE_BASE64 != '' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Generate Gradle Wrapper if missing
+        run: |
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+            gradle wrapper --gradle-version 8.13
+          fi
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Restore signing keystore
+        run: |
+          mkdir -p signing
+          echo "${{ secrets.TTS_READER_KEYSTORE_BASE64 }}" | base64 --decode > signing/tts-reader.jks
+
+      - name: Build Debug APK
+        env:
+          TTS_READER_KEYSTORE: signing/tts-reader.jks
+          TTS_READER_KEYSTORE_PASSWORD: ${{ secrets.TTS_READER_KEYSTORE_PASSWORD }}
+          TTS_READER_KEY_ALIAS: ${{ secrets.TTS_READER_KEY_ALIAS }}
+          TTS_READER_KEY_PASSWORD: ${{ secrets.TTS_READER_KEY_PASSWORD }}
+        run: ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
