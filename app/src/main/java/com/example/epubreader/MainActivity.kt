@@ -28,7 +28,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -184,7 +183,15 @@ private fun ReaderScreen(
     val state by vm.reader.collectAsStateWithLifecycle()
     val chapter = state.parsed?.chapters?.getOrNull(state.chapterIndex)
     val sentences = state.sentences
-    val listState = rememberLazyListState()
+    val listState = remember(state.book?.id, state.chapterIndex, sentences.size) {
+        LazyListState(
+            firstVisibleItemIndex = if (sentences.isEmpty()) {
+                0
+            } else {
+                sentenceListItemIndex(state.sentenceIndex.coerceIn(sentences.indices))
+            },
+        )
+    }
     var showContents by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var showSleepTimer by remember { mutableStateOf(false) }
@@ -208,11 +215,7 @@ private fun ReaderScreen(
         if (sentences.isEmpty()) return@LaunchedEffect
         val target = state.sentenceIndex.coerceIn(sentences.indices)
         if (!listState.isItemVisible(target)) {
-            if (state.isSpeaking) {
-                listState.scrollToItem(target)
-            } else {
-                listState.animateScrollToItem(target)
-            }
+            listState.scrollToItem(sentenceListItemIndex(target))
         }
     }
 
@@ -365,8 +368,10 @@ private fun ReaderBottomBar(
 
 private fun LazyListState.isItemVisible(index: Int): Boolean {
     val visible = layoutInfo.visibleItemsInfo
-    return visible.any { it.index == index + 1 }
+    return visible.any { it.index == sentenceListItemIndex(index) }
 }
+
+private fun sentenceListItemIndex(sentenceIndex: Int): Int = sentenceIndex + 1
 
 @Composable
 private fun SentenceRow(
