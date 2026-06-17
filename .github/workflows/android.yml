@@ -33,13 +33,10 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      - name: Restore signing key
-        if: env.HAS_SIGNING_KEY == 'true'
-        env:
-          TTS_READER_KEYSTORE_BASE64: ${{ secrets.TTS_READER_KEYSTORE_BASE64 }}
+      - name: Restore signing keystore
         run: |
           mkdir -p signing
-          echo "$TTS_READER_KEYSTORE_BASE64" | base64 --decode > signing/tts-reader.jks
+          echo "${{ secrets.TTS_READER_KEYSTORE_BASE64 }}" | base64 --decode > signing/tts-reader.jks
 
       - name: Build Debug APK
         env:
