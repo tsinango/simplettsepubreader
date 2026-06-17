@@ -189,6 +189,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun moveChapterFromScroll(direction: Int) = viewModelScope.launch {
+        val state = _reader.value
+        if (state.isSpeaking || direction == 0) return@launch
+        val move = findReadableChapter(state, direction.sign()) ?: return@launch
+        val next = state.copy(
+            chapterIndex = move.chapterIndex,
+            sentenceIndex = if (direction > 0) 0 else move.sentences.lastIndex,
+            sentences = move.sentences,
+        )
+        _reader.value = next
+        updateReaderProgress()
+        persistCurrent("UI")
+    }
+
     fun startSleepTimer() {
         val minutes = _reader.value.sleepTimerMinutes.coerceIn(MIN_SLEEP_TIMER_MINUTES, MAX_SLEEP_TIMER_MINUTES)
         val endAt = System.currentTimeMillis() + minutes * MILLIS_PER_MINUTE
@@ -232,7 +246,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun moveLocalSentence(delta: Int) = viewModelScope.launch {
         val state = _reader.value
-        val parsed = state.parsed ?: return@launch
+        if (state.parsed == null) return@launch
         if (state.sentences.isEmpty()) return@launch
         val localIndex = state.sentenceIndex + delta
         if (localIndex in state.sentences.indices) {
@@ -242,23 +256,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return@launch
         }
 
-        val direction = delta.sign()
-        var nextChapterIndex = state.chapterIndex + direction
-        var nextSentences: List<SentenceRef>
-        while (true) {
-            val nextChapter = parsed.chapters.getOrNull(nextChapterIndex) ?: return@launch
-            nextSentences = repository.sentences(nextChapter)
-            if (nextSentences.isNotEmpty()) break
-            nextChapterIndex += direction
-        }
+        val move = findReadableChapter(state, delta.sign()) ?: return@launch
         _reader.value = state.copy(
-            chapterIndex = nextChapterIndex,
-            sentenceIndex = if (delta > 0) 0 else nextSentences.lastIndex,
-            sentences = nextSentences,
+            chapterIndex = move.chapterIndex,
+            sentenceIndex = if (delta > 0) 0 else move.sentences.lastIndex,
+            sentences = move.sentences,
         )
         updateReaderProgress()
         persistCurrent("UI")
     }
+
+    private suspend fun findReadableChapter(state: ReaderUiState, direction: Int): ChapterMove? {
+        val parsed = state.parsed ?: return null
+        var nextChapterIndex = state.chapterIndex + direction
+        while (true) {
+            val nextChapter = parsed.chapters.getOrNull(nextChapterIndex) ?: return null
+            val nextSentences = repository.sentences(nextChapter)
+            if (nextSentences.isNotEmpty()) {
+                return ChapterMove(nextChapterIndex, nextSentences)
+            }
+            nextChapterIndex += direction
+        }
+    }
+
+    private data class ChapterMove(
+        val chapterIndex: Int,
+        val sentences: List<SentenceRef>,
+    )
 
     private fun scheduleSleepTimer(endAt: Long) {
         sleepTimerJob?.cancel()

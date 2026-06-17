@@ -61,6 +61,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -195,6 +196,7 @@ private fun ReaderScreen(
     var showContents by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var showSleepTimer by remember { mutableStateOf(false) }
+    var lastScrollDirection by remember { mutableStateOf(0) }
     val lifecycle = LocalLifecycleOwner.current
 
     DisposableEffect(lifecycle) {
@@ -219,9 +221,33 @@ private fun ReaderScreen(
         }
     }
 
+    LaunchedEffect(listState) {
+        var previousIndex = listState.firstVisibleItemIndex
+        var previousOffset = listState.firstVisibleItemScrollOffset
+        snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
+            .collect { (index, offset) ->
+                lastScrollDirection = when {
+                    index > previousIndex || (index == previousIndex && offset > previousOffset) -> 1
+                    index < previousIndex || (index == previousIndex && offset < previousOffset) -> -1
+                    else -> lastScrollDirection
+                }
+                previousIndex = index
+                previousOffset = offset
+            }
+    }
+
     LaunchedEffect(listState.isScrollInProgress) {
-        if (!state.isSpeaking && !listState.isScrollInProgress && sentences.isNotEmpty()) {
-            vm.visibleSentence((listState.firstVisibleItemIndex - 1).coerceIn(sentences.indices))
+        if (state.isSpeaking || listState.isScrollInProgress || sentences.isEmpty()) return@LaunchedEffect
+        when {
+            lastScrollDirection > 0 && !listState.canScrollForward -> {
+                lastScrollDirection = 0
+                vm.moveChapterFromScroll(1)
+            }
+            lastScrollDirection < 0 && !listState.canScrollBackward -> {
+                lastScrollDirection = 0
+                vm.moveChapterFromScroll(-1)
+            }
+            else -> vm.visibleSentence((listState.firstVisibleItemIndex - 1).coerceIn(sentences.indices))
         }
     }
 
