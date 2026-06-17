@@ -22,6 +22,7 @@ class ReaderRepository(
     private val sentenceCache = lruCache<String, List<SentenceRef>>(48)
     private var lastSavedLocatorKey: String? = null
     val books: Flow<List<BookEntity>> = dao.books()
+    val locators: Flow<List<ReadingLocatorEntity>> = dao.locators()
     val settings: Flow<ReaderSettingsEntity?> = dao.settings()
 
     suspend fun import(uri: Uri): BookEntity {
@@ -116,8 +117,46 @@ class ReaderRepository(
             ?.takeIf { commonPrefix(it.text, locator.context) >= 8 }
     }
 
+    fun progressPercent(
+        parsed: ParsedBook,
+        chapterIndex: Int,
+        sentenceIndex: Int,
+    ): Int {
+        val total = parsed.chapters.sumOf { cachedSentences(it).size }
+        if (total <= 0) return 0
+
+        val completedBeforeChapter = parsed.chapters
+            .take(chapterIndex.coerceIn(0, parsed.chapters.lastIndex + 1))
+            .sumOf { cachedSentences(it).size }
+        val currentChapter = parsed.chapters.getOrNull(chapterIndex) ?: return 0
+        val currentSentences = cachedSentences(currentChapter)
+        if (currentSentences.isEmpty()) return percentFromIndex(completedBeforeChapter, total)
+
+        val globalIndex = completedBeforeChapter + sentenceIndex.coerceIn(currentSentences.indices)
+        return percentFromIndex(globalIndex, total)
+    }
+
+    fun progressPercent(parsed: ParsedBook, locator: ReadingLocatorEntity?): Int {
+        if (locator == null) return 0
+        val chapterIndex = parsed.chapters.indexOfFirst { it.path == locator.chapterPath }
+        if (chapterIndex < 0) return 0
+        val sentenceIndex = cachedSentences(parsed.chapters[chapterIndex]).indexOfFirst {
+            it.paragraphIndex == locator.paragraphIndex && it.sentenceIndex == locator.sentenceIndex
+        }
+        if (sentenceIndex < 0) return 0
+        return progressPercent(parsed, chapterIndex, sentenceIndex)
+    }
+
     private fun commonPrefix(a: String, b: String): Int =
         a.zip(b).takeWhile { (left, right) -> left == right }.size
+
+    private fun percentFromIndex(globalIndex: Int, total: Int): Int =
+        if (total <= 1) {
+            100
+        } else {
+            ((globalIndex.coerceIn(0, total - 1) * 100f) / (total - 1)).toInt()
+                .coerceIn(0, 100)
+        }
 
     private fun cacheParsed(bookId: String, parsed: ParsedBook) {
         synchronized(cacheLock) {

@@ -24,6 +24,9 @@ interface ReaderDao {
     @Query("SELECT * FROM locators WHERE bookId = :bookId")
     suspend fun locator(bookId: String): ReadingLocatorEntity?
 
+    @Query("SELECT * FROM locators")
+    fun locators(): Flow<List<ReadingLocatorEntity>>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun saveLocator(locator: ReadingLocatorEntity)
 

@@ -2,6 +2,7 @@ package com.example.epubreader
 
 import android.Manifest
 import android.os.Bundle
+import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -196,10 +197,13 @@ private fun ReaderScreen(
         lifecycle.lifecycle.addObserver(observer)
         onDispose {
             vm.persistCurrent()
-            lifecycle.lifecycle.removeObserver(observer)
+        lifecycle.lifecycle.removeObserver(observer)
         }
     }
-
+    BackHandler {
+        vm.persistCurrent()
+        onBack()
+    }
     LaunchedEffect(state.chapterIndex, state.sentenceIndex, sentences.size) {
         if (sentences.isEmpty()) return@LaunchedEffect
         val target = state.sentenceIndex.coerceIn(sentences.indices)
@@ -240,6 +244,7 @@ private fun ReaderScreen(
         bottomBar = {
             ReaderBottomBar(
                 isSpeaking = state.isSpeaking,
+                progress = state.progress,
                 sleepTimerText = sleepTimerLabel(state),
                 onPrevious = vm::previousSentence,
                 onPlayPause = vm::togglePlayPause,
@@ -327,6 +332,7 @@ private fun sleepTimerLabel(state: ReaderUiState): String =
 @Composable
 private fun ReaderBottomBar(
     isSpeaking: Boolean,
+    progress: Float,
     sleepTimerText: String,
     onPrevious: () -> Unit,
     onPlayPause: () -> Unit,
@@ -334,21 +340,26 @@ private fun ReaderBottomBar(
     onSleepTimer: () -> Unit,
 ) {
     Row(
-        Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surfaceContainer)
-            .padding(8.dp),
+        Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainer)
+            .padding(horizontal = 10.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        ReaderControlButton("上一句", Icons.Default.SkipPrevious, onPrevious)
+        ReaderControlButton("上一句", Icons.Default.SkipPrevious, null, onPrevious)
         ReaderControlButton(
             if (isSpeaking) "暂停" else "朗读",
             if (isSpeaking) Icons.Default.Pause else Icons.Default.PlayArrow,
+            null,
             onPlayPause,
         )
-        ReaderControlButton("下一句", Icons.Default.SkipNext, onNext)
-        ReaderControlButton(sleepTimerText, Icons.Default.Timer, onSleepTimer)
+        ReaderControlButton("下一句", Icons.Default.SkipNext, null, onNext)
+        Text(
+            formatProgress(progress),
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.width(48.dp),
+        )
+        ReaderControlButton("睡眠定时", Icons.Default.Timer, sleepTimerText, onSleepTimer)
     }
 }
 
@@ -386,16 +397,19 @@ private fun SentenceRow(
 private fun ReaderControlButton(
     label: String,
     icon: ImageVector,
+    text: String?,
     onClick: () -> Unit,
 ) {
     Column(
-        modifier = Modifier.width(72.dp),
+        modifier = Modifier.width(52.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        IconButton(onClick = onClick, modifier = Modifier.size(48.dp)) {
+        IconButton(onClick = onClick, modifier = Modifier.size(40.dp)) {
             Icon(icon, label)
         }
-        Text(label, fontSize = 11.sp, maxLines = 1)
+        if (text != null) {
+            Text(text, fontSize = 11.sp, maxLines = 1)
+        }
     }
 }
 
