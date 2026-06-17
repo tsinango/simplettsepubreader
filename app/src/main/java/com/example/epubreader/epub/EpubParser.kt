@@ -55,7 +55,7 @@ class EpubParser {
             )
         }
 
-        val navTitles = parseNavTitles(zip, manifest)
+        val navTitles = parseNcxTitles(zip, opf, base, manifest) + parseNavTitles(zip, manifest)
 
         val chapters = mutableListOf<Chapter>()
         val refs = opf.getElementsByTagNameNS("*", "itemref")
@@ -96,7 +96,7 @@ class EpubParser {
             if (blocks.isNotEmpty()) {
                 val chapterTitle =
                     navTitles[item.href]
-                        ?: document.selectFirst("h1,h2,h3,title")?.text()?.clean()
+                        ?: document.selectFirst("h1,h2,h3")?.text()?.clean()
                         ?: "第 ${chapters.size + 1} 章"
 
                 chapters += Chapter(item.href, chapterTitle, blocks)
@@ -129,6 +129,57 @@ class EpubParser {
                 }
             }
             .toMap()
+    }
+
+    private fun parseNcxTitles(
+        zip: ZipFile,
+        opf: org.w3c.dom.Document,
+        base: String,
+        manifest: Map<String, ManifestItem>
+    ): Map<String, String> {
+        val spine = opf.getElementsByTagNameNS("*", "spine").item(0) as? Element
+            ?: return emptyMap()
+
+        val tocId = spine.getAttribute("toc")
+        val ncxItem = manifest[tocId] ?: manifest.values.firstOrNull {
+            it.mediaType.contains("ncx", ignoreCase = true)
+        } ?: return emptyMap()
+
+        val entry = zip.getEntry(ncxItem.href) ?: return emptyMap()
+        val ncx = xml(zip.getInputStream(entry).readBytes())
+
+        val result = mutableMapOf<String, String>()
+        val navPoints = ncx.getElementsByTagNameNS("*", "navPoint")
+
+        for (i in 0 until navPoints.length) {
+            val navPoint = navPoints.item(i) as Element
+
+            val label = navPoint
+                .getElementsByTagNameNS("*", "text")
+                .item(0)
+                ?.textContent
+                ?.clean()
+                ?.removePrefix("#")
+                ?.replace(Regex("\\.{2,}\\s*\\d+$"), "")
+                ?.trim()
+                .orEmpty()
+
+            val content = navPoint
+                .getElementsByTagNameNS("*", "content")
+                .item(0) as? Element ?: continue
+
+            val src = content.getAttribute("src")
+                .substringBefore('#')
+                .takeIf { it.isNotBlank() } ?: continue
+
+            val path = resolve(base, src)
+
+            if (label.isNotBlank()) {
+                result[path] = label
+            }
+        }
+
+        return result
     }
 
     private fun ZipFile.read(path: String): ByteArray =
