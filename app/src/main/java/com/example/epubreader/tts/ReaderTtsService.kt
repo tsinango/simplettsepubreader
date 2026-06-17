@@ -177,14 +177,30 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         return false
     }
 
-    private suspend fun applySettings() {
-        val settings = repository.settings.first()
-        tts?.setSpeechRate(settings?.speechRate ?: 1f)
-        tts?.setPitch(settings?.pitch ?: 1f)
-        settings?.voiceName?.let { name ->
-            tts?.voices?.firstOrNull { it.name == name }?.let { tts?.voice = it }
-        }
+
+private suspend fun applySettings() {
+    val settings = repository.settings.first()
+
+    val userRate = settings?.speechRate ?: 1f
+
+    // 放大 1x 以上的速度差异：
+    // UI 1.0 -> 实际 1.0
+    // UI 1.5 -> 实际 2.25
+    // UI 2.0 -> 实际 3.5
+    val actualRate = if (userRate <= 1f) {
+        userRate
+    } else {
+        1f + (userRate - 1f) * 2.5f
+    }.coerceIn(0.3f, 4.0f)
+
+    tts?.setSpeechRate(actualRate)
+    tts?.setPitch(settings?.pitch ?: 1f)
+
+    settings?.voiceName?.let { name ->
+        tts?.voices?.firstOrNull { it.name == name }?.let { tts?.voice = it }
     }
+}
+    
 
     private suspend fun reloadSettings() {
         applySettings()
