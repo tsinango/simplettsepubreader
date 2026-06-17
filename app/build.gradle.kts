@@ -1,9 +1,28 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
 }
+
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.isFile) {
+        file.inputStream().use(::load)
+    }
+}
+
+fun signingValue(name: String): String? =
+    (localProperties.getProperty(name) ?: providers.environmentVariable(name).orNull)
+        ?.takeIf { it.isNotBlank() }
+
+val fixedDebugStoreFile = signingValue("TTS_READER_KEYSTORE")?.let { rootProject.file(it) }
+val hasFixedDebugSigning = fixedDebugStoreFile?.isFile == true &&
+    signingValue("TTS_READER_KEYSTORE_PASSWORD")?.isNotBlank() == true &&
+    signingValue("TTS_READER_KEY_ALIAS")?.isNotBlank() == true &&
+    signingValue("TTS_READER_KEY_PASSWORD")?.isNotBlank() == true
 
 android {
     namespace = "com.example.epubreader"
@@ -13,9 +32,33 @@ android {
         applicationId = "com.example.epubreader"
         minSdk = 31
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        if (hasFixedDebugSigning) {
+            create("fixedDebug") {
+                storeFile = fixedDebugStoreFile
+                storePassword = signingValue("TTS_READER_KEYSTORE_PASSWORD")
+                keyAlias = signingValue("TTS_READER_KEY_ALIAS")
+                keyPassword = signingValue("TTS_READER_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            if (hasFixedDebugSigning) {
+                signingConfig = signingConfigs.getByName("fixedDebug")
+            }
+        }
+        release {
+            if (hasFixedDebugSigning) {
+                signingConfig = signingConfigs.getByName("fixedDebug")
+            }
+        }
     }
 
     buildFeatures { compose = true }
