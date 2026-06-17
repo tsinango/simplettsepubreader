@@ -5,10 +5,11 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,8 +30,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -64,17 +65,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.epubreader.data.ReaderSettingsEntity
 import com.example.epubreader.data.SentenceRef
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -92,17 +93,21 @@ class MainActivity : ComponentActivity() {
 private fun ReaderApp(vm: MainViewModel = viewModel()) {
     val reader by vm.reader.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
+    val bookProgress by vm.bookProgress.collectAsStateWithLifecycle()
     var currentBookId by remember { mutableStateOf<String?>(null) }
     val theme = settings?.theme ?: "SYSTEM"
     val dark = theme == "DARK" || (theme == "SYSTEM" && isSystemInDarkTheme())
+
     MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
         if (currentBookId == null) {
-            LibraryScreen(vm) { id ->
+            LibraryScreen(vm, bookProgress) { id ->
                 currentBookId = id
                 vm.open(id)
             }
         } else {
-            ReaderScreen(vm, settings ?: ReaderSettingsEntity()) { currentBookId = null }
+            ReaderScreen(vm, settings ?: ReaderSettingsEntity()) {
+                currentBookId = null
+            }
         }
         reader.error?.let { ErrorDialog(it, vm::clearError) }
     }
@@ -110,11 +115,16 @@ private fun ReaderApp(vm: MainViewModel = viewModel()) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun LibraryScreen(vm: MainViewModel, onOpen: (String) -> Unit) {
+private fun LibraryScreen(
+    vm: MainViewModel,
+    progress: Map<String, Float>,
+    onOpen: (String) -> Unit,
+) {
     val books by vm.books.collectAsStateWithLifecycle()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) {
         it?.let(vm::import)
     }
+
     Scaffold(
         topBar = { TopAppBar(title = { Text("TTS Reader") }) },
         floatingActionButton = {
@@ -124,20 +134,37 @@ private fun LibraryScreen(vm: MainViewModel, onOpen: (String) -> Unit) {
         },
     ) { padding ->
         if (books.isEmpty()) {
-            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .padding(padding),
+                contentAlignment = Alignment.Center,
+            ) {
                 Text("点击右下角导入 EPUB")
             }
         } else {
             LazyColumn(
-                modifier = Modifier.padding(padding).fillMaxSize(),
+                modifier = Modifier
+                    .padding(padding)
+                    .fillMaxSize(),
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 items(books, key = { it.id }) { book ->
-                    Card(Modifier.fillMaxWidth().clickable { onOpen(book.id) }) {
+                    Card(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpen(book.id) },
+                    ) {
                         Column(Modifier.padding(18.dp)) {
                             Text(book.title, fontWeight = FontWeight.Bold)
                             Text(book.author, style = MaterialTheme.typography.bodyMedium)
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                text = "阅读进度 ${formatProgress(progress[book.id] ?: 0f)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                 }
@@ -172,6 +199,7 @@ private fun ReaderScreen(
             lifecycle.lifecycle.removeObserver(observer)
         }
     }
+
     LaunchedEffect(state.chapterIndex, state.sentenceIndex, sentences.size) {
         if (sentences.isEmpty()) return@LaunchedEffect
         val target = state.sentenceIndex.coerceIn(sentences.indices)
@@ -183,6 +211,7 @@ private fun ReaderScreen(
             }
         }
     }
+
     LaunchedEffect(listState.isScrollInProgress) {
         if (!state.isSpeaking && !listState.isScrollInProgress && sentences.isNotEmpty()) {
             vm.visibleSentence((listState.firstVisibleItemIndex - 1).coerceIn(sentences.indices))
@@ -199,8 +228,12 @@ private fun ReaderScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { showContents = true }) { Icon(Icons.Default.Menu, "目录") }
-                    IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "设置") }
+                    IconButton(onClick = { showContents = true }) {
+                        Icon(Icons.Default.Menu, "目录")
+                    }
+                    IconButton(onClick = { showSettings = true }) {
+                        Icon(Icons.Default.Settings, "设置")
+                    }
                 },
             )
         },
@@ -211,15 +244,15 @@ private fun ReaderScreen(
                 onPrevious = vm::previousSentence,
                 onPlayPause = vm::togglePlayPause,
                 onNext = vm::nextSentence,
-                onSleepTimer = {
-                    showSleepTimer = true
-                },
+                onSleepTimer = { showSleepTimer = true },
             )
         },
     ) { padding ->
         LazyColumn(
             state = listState,
-            modifier = Modifier.padding(padding).fillMaxSize(),
+            modifier = Modifier
+                .padding(padding)
+                .fillMaxSize(),
             contentPadding = PaddingValues(
                 horizontal = settings.horizontalPadding.dp,
                 vertical = 24.dp,
@@ -227,7 +260,17 @@ private fun ReaderScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             item {
-                Text(chapter?.title.orEmpty(), fontSize = (settings.fontSize + 6).sp, fontWeight = FontWeight.Bold)
+                Text(
+                    chapter?.title.orEmpty(),
+                    fontSize = (settings.fontSize + 6).sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "阅读进度 ${formatProgress(state.progress)}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 Spacer(Modifier.height(10.dp))
             }
             itemsIndexed(sentences, key = { _, item -> "${item.paragraphIndex}:${item.sentenceIndex}" }) { index, item ->
@@ -235,6 +278,7 @@ private fun ReaderScreen(
             }
         }
     }
+
     if (showContents) {
         AlertDialog(
             onDismissRequest = { showContents = false },
@@ -242,17 +286,27 @@ private fun ReaderScreen(
             text = {
                 LazyColumn {
                     itemsIndexed(state.parsed?.chapters.orEmpty()) { index, item ->
-                        Text(item.title, Modifier.fillMaxWidth().clickable {
-                            vm.selectChapter(index)
-                            showContents = false
-                        }.padding(12.dp))
+                        Text(
+                            item.title,
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    vm.selectChapter(index)
+                                    showContents = false
+                                }
+                                .padding(12.dp),
+                        )
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = { showContents = false }) { Text("关闭") } },
+            confirmButton = {
+                TextButton(onClick = { showContents = false }) { Text("关闭") }
+            },
         )
     }
+
     if (showSettings) SettingsDialog(settings, vm::updateSettings) { showSettings = false }
+
     if (showSleepTimer) {
         SleepTimerDialog(
             minutes = state.sleepTimerMinutes,
@@ -280,7 +334,9 @@ private fun ReaderBottomBar(
     onSleepTimer: () -> Unit,
 ) {
     Row(
-        Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainer)
+        Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceContainer)
             .padding(8.dp),
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically,
@@ -372,20 +428,14 @@ private fun SleepTimerDialog(
             }
         },
         confirmButton = {
-            Button(onClick = {
-                onStart()
-                onClose()
-            }) {
+            Button(onClick = { onStart(); onClose() }) {
                 Text(if (active) "重置" else "开启")
             }
         },
         dismissButton = {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (active) {
-                    TextButton(onClick = {
-                        onCancel()
-                        onClose()
-                    }) { Text("关闭") }
+                    TextButton(onClick = { onCancel(); onClose() }) { Text("关闭") }
                 }
                 TextButton(onClick = onClose) { Text("取消") }
             }
@@ -424,7 +474,9 @@ private fun SettingsDialog(
         confirmButton = {
             Button(onClick = { onChange(value); onClose() }) { Text("保存") }
         },
-        dismissButton = { TextButton(onClick = onClose) { Text("取消") } },
+        dismissButton = {
+            TextButton(onClick = onClose) { Text("取消") }
+        },
     )
 }
 
@@ -434,6 +486,11 @@ private fun ErrorDialog(message: String, onClose: () -> Unit) {
         onDismissRequest = onClose,
         title = { Text("无法完成操作") },
         text = { Text(message) },
-        confirmButton = { TextButton(onClick = onClose) { Text("知道了") } },
+        confirmButton = {
+            TextButton(onClick = onClose) { Text("知道了") }
+        },
     )
 }
+
+private fun formatProgress(progress: Float): String =
+    String.format(Locale.US, "%.1f%%", progress.coerceIn(0f, 100f))
