@@ -93,11 +93,19 @@ class VitsModelManager(private val context: Context) {
         private const val READY_FILE = ".ready-75a59ed"
 
         fun modelDir(context: Context) = File(context.filesDir, "models/vits-zh-hf-fanchen-wnj")
-        fun isReady(context: Context) = File(modelDir(context), READY_FILE).isFile
+        fun isReady(context: Context): Boolean =
+            File(modelDir(context), READY_FILE).isFile &&
+                modelFile(context).length() == MODEL_FILE_SIZE &&
+                tokensFile(context).length() == TOKENS_FILE_SIZE &&
+                lexiconFile(context).length() == LEXICON_FILE_SIZE
         fun modelFile(context: Context) = File(modelDir(context), "vits-zh-hf-fanchen-wnj.onnx")
         fun tokensFile(context: Context) = File(modelDir(context), "tokens.txt")
         fun lexiconFile(context: Context) = File(modelDir(context), "lexicon.txt")
         internal fun readyFile(context: Context) = File(modelDir(context), READY_FILE)
+
+        private const val MODEL_FILE_SIZE = 121_076_185L
+        private const val TOKENS_FILE_SIZE = 331L
+        private const val LEXICON_FILE_SIZE = 2_457_843L
     }
 }
 

@@ -16,6 +16,9 @@ import com.example.epubreader.data.ReaderSettingsEntity
 import com.example.epubreader.data.ReadingLocatorEntity
 import com.example.epubreader.data.SentenceRef
 import com.example.epubreader.tts.ReaderTtsService
+import com.example.epubreader.tts.TtsBackend
+import com.example.epubreader.tts.TtsPerformanceSnapshot
+import com.example.epubreader.tts.TtsPerformanceStore
 import com.example.epubreader.tts.VitsModelManager
 import com.example.epubreader.tts.VitsModelState
 import com.example.epubreader.tts.VitsModelStatus
@@ -57,6 +60,7 @@ data class ReaderPositionState(
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = (application as ReaderApplication).repository
     private val vitsModelManager = VitsModelManager(application)
+    private val ttsPerformanceStore = TtsPerformanceStore(application)
 
     val books = repository.books.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val settings = repository.settings.stateIn(
@@ -69,6 +73,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         SharingStarted.WhileSubscribed(5000),
         vitsModelManager.currentState(),
     )
+    private val _ttsPerformance = MutableStateFlow(ttsPerformanceStore.snapshot())
+    val ttsPerformance: StateFlow<TtsPerformanceSnapshot> = _ttsPerformance
 
     private val _reader = MutableStateFlow(ReaderUiState())
     val reader: StateFlow<ReaderUiState> = _reader
@@ -294,6 +300,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         vitsModelManager.clearSwitchAfterDownload()
         if (settings.value?.ttsEngine == TTS_ENGINE_VITS) useSystemTts()
         vitsModelManager.delete()
+    }
+
+    fun selectTtsBackend(backend: TtsBackend) {
+        ttsPerformanceStore.setRequestedBackend(backend)
+        _ttsPerformance.value = ttsPerformanceStore.snapshot()
+        if (_readerPosition.value.isSpeaking) sendAction(ReaderTtsService.ACTION_SETTINGS_CHANGED)
+    }
+
+    fun refreshTtsPerformance() {
+        _ttsPerformance.value = ttsPerformanceStore.snapshot()
     }
 
     fun togglePlayPause() {

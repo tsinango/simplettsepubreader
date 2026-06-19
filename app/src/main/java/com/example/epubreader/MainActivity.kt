@@ -92,6 +92,8 @@ import com.example.epubreader.data.SentenceRef
 import com.example.epubreader.tts.VitsModelManager
 import com.example.epubreader.tts.VitsModelState
 import com.example.epubreader.tts.VitsModelStatus
+import com.example.epubreader.tts.TtsBackend
+import com.example.epubreader.tts.TtsPerformanceSnapshot
 import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -252,6 +254,7 @@ private fun ReaderScreen(
     val state by vm.reader.collectAsStateWithLifecycle()
     val position by vm.readerPosition.collectAsStateWithLifecycle()
     val vitsModelState by vm.vitsModelState.collectAsStateWithLifecycle()
+    val ttsPerformance by vm.ttsPerformance.collectAsStateWithLifecycle()
     val readingItems = remember(
         state.previousChapterIndex,
         state.previousSentences,
@@ -356,7 +359,7 @@ private fun ReaderScreen(
                     IconButton(onClick = { showContents = true }) {
                         Icon(Icons.Default.Menu, "目录")
                     }
-                    IconButton(onClick = { showSettings = true }) {
+                    IconButton(onClick = { vm.refreshTtsPerformance(); showSettings = true }) {
                         Icon(Icons.Default.Settings, "设置")
                     }
                 },
@@ -445,11 +448,13 @@ private fun ReaderScreen(
         SettingsDialog(
             current = settings,
             modelState = vitsModelState,
+            performance = ttsPerformance,
             onChange = vm::updateSettings,
             onUseSystemTts = vm::useSystemTts,
             onUseVitsTts = vm::useVitsTts,
             onCancelDownload = vm::cancelVitsDownload,
             onDeleteModel = vm::deleteVitsModel,
+            onSelectBackend = vm::selectTtsBackend,
             onClose = { showSettings = false },
         )
     }
@@ -681,15 +686,20 @@ private fun SleepTimerDialog(
 private fun SettingsDialog(
     current: ReaderSettingsEntity,
     modelState: VitsModelState,
+    performance: TtsPerformanceSnapshot,
     onChange: (ReaderSettingsEntity) -> Unit,
     onUseSystemTts: () -> Unit,
     onUseVitsTts: () -> Unit,
     onCancelDownload: () -> Unit,
     onDeleteModel: () -> Unit,
+    onSelectBackend: (TtsBackend) -> Unit,
     onClose: () -> Unit,
 ) {
     var value by remember { mutableStateOf(current) }
     var confirmDownload by remember { mutableStateOf(false) }
+    LaunchedEffect(current.ttsEngine) {
+        value = value.copy(ttsEngine = current.ttsEngine)
+    }
     AlertDialog(
         onDismissRequest = onClose,
         title = { Text("阅读设置") },
@@ -703,14 +713,21 @@ private fun SettingsDialog(
                 Slider(value.speechRate, { value = value.copy(speechRate = it) }, valueRange = .5f..2f)
                 Text("朗读引擎")
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    TextButton(onClick = onUseSystemTts) {
-                        Text(if (current.ttsEngine == MainViewModel.TTS_ENGINE_SYSTEM) "✓ 系统 TTS" else "系统 TTS")
+                    TextButton(onClick = {
+                        value = value.copy(ttsEngine = MainViewModel.TTS_ENGINE_SYSTEM)
+                        onUseSystemTts()
+                    }) {
+                        Text(if (value.ttsEngine == MainViewModel.TTS_ENGINE_SYSTEM) "✓ 系统 TTS" else "系统 TTS")
                     }
                     TextButton(onClick = {
-                        if (modelState.status == VitsModelStatus.READY) onUseVitsTts()
-                        else confirmDownload = true
+                        if (modelState.status == VitsModelStatus.READY) {
+                            value = value.copy(ttsEngine = MainViewModel.TTS_ENGINE_VITS)
+                            onUseVitsTts()
+                        } else {
+                            confirmDownload = true
+                        }
                     }) {
-                        Text(if (current.ttsEngine == MainViewModel.TTS_ENGINE_VITS) "✓ 内置 VITS" else "内置 VITS")
+                        Text(if (value.ttsEngine == MainViewModel.TTS_ENGINE_VITS) "✓ 内置 VITS" else "内置 VITS")
                     }
                 }
                 when (modelState.status) {
@@ -726,6 +743,29 @@ private fun SettingsDialog(
                     }
                     VitsModelStatus.NOT_DOWNLOADED -> Text("模型未下载")
                 }
+                if (modelState.status == VitsModelStatus.READY) {
+                    Text("推理后端")
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        listOf(
+                            TtsBackend.AUTO to "自动",
+                            TtsBackend.QNN_HTP to "QNN",
+                            TtsBackend.CPU to "CPU",
+                        ).forEach { (backend, label) ->
+                            TextButton(onClick = { onSelectBackend(backend) }) {
+                                Text(if (performance.requestedBackend == backend) "✓ $label" else label)
+                            }
+                        }
+                    }
+                    Text(
+                        "当前：${performance.activeBackend.name} / ${performance.cpuThreads} 线程" +
+                            if (performance.realTimeFactor > 0f) {
+                                "，RTF ${"%.2f".format(performance.realTimeFactor)}，预取 ${"%.0f".format(performance.prefetchHitRate * 100)}%"
+                            } else "",
+                    )
+                    performance.fallbackReason?.let {
+                        Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
                 Text("主题")
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf("SYSTEM" to "跟随系统", "LIGHT" to "亮色", "DARK" to "深色").forEach { (id, label) ->
@@ -737,7 +777,7 @@ private fun SettingsDialog(
             }
         },
         confirmButton = {
-            Button(onClick = { onChange(value.copy(ttsEngine = current.ttsEngine)); onClose() }) { Text("保存") }
+            Button(onClick = { onChange(value); onClose() }) { Text("保存") }
         },
         dismissButton = {
             TextButton(onClick = onClose) { Text("取消") }
