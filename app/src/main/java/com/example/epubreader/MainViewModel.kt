@@ -16,6 +16,9 @@ import com.example.epubreader.data.ReaderSettingsEntity
 import com.example.epubreader.data.ReadingLocatorEntity
 import com.example.epubreader.data.SentenceRef
 import com.example.epubreader.tts.ReaderTtsService
+import com.example.epubreader.tts.VitsModelManager
+import com.example.epubreader.tts.VitsModelState
+import com.example.epubreader.tts.VitsModelStatus
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -53,12 +56,18 @@ data class ReaderPositionState(
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = (application as ReaderApplication).repository
+    private val vitsModelManager = VitsModelManager(application)
 
     val books = repository.books.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val settings = repository.settings.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5000),
         null,
+    )
+    val vitsModelState: StateFlow<VitsModelState> = vitsModelManager.state.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5000),
+        vitsModelManager.currentState(),
     )
 
     private val _reader = MutableStateFlow(ReaderUiState())
@@ -88,6 +97,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             books.collect { refreshLibraryProgress(it) }
+        }
+        viewModelScope.launch {
+            vitsModelState.collect { state ->
+                if (vitsModelManager.shouldSwitchAfterDownload() &&
+                    state.status == VitsModelStatus.READY
+                ) {
+                    vitsModelManager.clearSwitchAfterDownload()
+                    val value = settings.value ?: ReaderSettingsEntity()
+                    updateSettings(value.copy(ttsEngine = TTS_ENGINE_VITS))
+                }
+            }
         }
     }
 
@@ -248,6 +268,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun updateSettings(value: ReaderSettingsEntity) = viewModelScope.launch {
         repository.saveSettings(value)
         if (_readerPosition.value.isSpeaking) sendAction(ReaderTtsService.ACTION_SETTINGS_CHANGED)
+    }
+
+    fun useSystemTts() {
+        vitsModelManager.clearSwitchAfterDownload()
+        updateSettings((settings.value ?: ReaderSettingsEntity()).copy(ttsEngine = TTS_ENGINE_SYSTEM))
+    }
+
+    fun useVitsTts() {
+        if (VitsModelManager.isReady(getApplication())) {
+            vitsModelManager.clearSwitchAfterDownload()
+            updateSettings((settings.value ?: ReaderSettingsEntity()).copy(ttsEngine = TTS_ENGINE_VITS))
+        } else {
+            vitsModelManager.requestSwitchAfterDownload()
+            vitsModelManager.download()
+        }
+    }
+
+    fun cancelVitsDownload() {
+        vitsModelManager.clearSwitchAfterDownload()
+        vitsModelManager.cancel()
+    }
+
+    fun deleteVitsModel() {
+        vitsModelManager.clearSwitchAfterDownload()
+        if (settings.value?.ttsEngine == TTS_ENGINE_VITS) useSystemTts()
+        vitsModelManager.delete()
     }
 
     fun togglePlayPause() {
@@ -443,19 +489,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val position = _readerPosition.value
         val currentBookId = state.book?.id ?: return
         if (intent.getStringExtra(ReaderTtsService.EXTRA_BOOK_ID) != currentBookId) return
+        val error = intent.getStringExtra(ReaderTtsService.EXTRA_ERROR)
+        if (error != null) _reader.value = state.copy(error = error)
         val playing = intent.getBooleanExtra(ReaderTtsService.EXTRA_PLAYING, false)
         val chapterPath = intent.getStringExtra(ReaderTtsService.EXTRA_CHAPTER_PATH)
         val paragraphIndex = intent.getIntExtra(ReaderTtsService.EXTRA_PARAGRAPH_INDEX, -1)
         val sentenceIndex = intent.getIntExtra(ReaderTtsService.EXTRA_SENTENCE_INDEX, -1)
         val parsed = state.parsed
         if (parsed == null || chapterPath == null || paragraphIndex < 0 || sentenceIndex < 0) {
-            _reader.value = state.copy(isSpeaking = playing)
+            _reader.value = _reader.value.copy(isSpeaking = playing)
             _readerPosition.value = position.copy(isSpeaking = playing)
             return
         }
         val chapterIndex = parsed.chapters.indexOfFirst { it.path == chapterPath }
         if (chapterIndex < 0) {
-            _reader.value = state.copy(isSpeaking = playing)
+            _reader.value = _reader.value.copy(isSpeaking = playing)
             _readerPosition.value = position.copy(isSpeaking = playing)
             return
         }
@@ -464,7 +512,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.paragraphIndex == paragraphIndex && it.sentenceIndex == sentenceIndex
         }
         if (localSentenceIndex < 0) {
-            _reader.value = state.copy(isSpeaking = playing)
+            _reader.value = _reader.value.copy(isSpeaking = playing)
             _readerPosition.value = position.copy(isSpeaking = playing)
             return
         }
@@ -590,6 +638,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     companion object {
+        const val TTS_ENGINE_SYSTEM = "SYSTEM"
+        const val TTS_ENGINE_VITS = "VITS"
         private const val MIN_SLEEP_TIMER_MINUTES = 5
         private const val MAX_SLEEP_TIMER_MINUTES = 120
         private const val MILLIS_PER_MINUTE = 60_000L

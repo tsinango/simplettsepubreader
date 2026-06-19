@@ -36,6 +36,7 @@ data class ReaderSettingsEntity(
     val speechRate: Float = 1f,
     val pitch: Float = 1f,
     val voiceName: String? = null,
+    val ttsEngine: String = "SYSTEM",
 )
 
 data class Chapter(

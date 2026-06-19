@@ -89,6 +89,9 @@ import com.example.epubreader.data.BookEntity
 import com.example.epubreader.data.Chapter
 import com.example.epubreader.data.ReaderSettingsEntity
 import com.example.epubreader.data.SentenceRef
+import com.example.epubreader.tts.VitsModelManager
+import com.example.epubreader.tts.VitsModelState
+import com.example.epubreader.tts.VitsModelStatus
 import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -248,6 +251,7 @@ private fun ReaderScreen(
 ) {
     val state by vm.reader.collectAsStateWithLifecycle()
     val position by vm.readerPosition.collectAsStateWithLifecycle()
+    val vitsModelState by vm.vitsModelState.collectAsStateWithLifecycle()
     val readingItems = remember(
         state.previousChapterIndex,
         state.previousSentences,
@@ -437,7 +441,18 @@ private fun ReaderScreen(
         )
     }
 
-    if (showSettings) SettingsDialog(settings, vm::updateSettings) { showSettings = false }
+    if (showSettings) {
+        SettingsDialog(
+            current = settings,
+            modelState = vitsModelState,
+            onChange = vm::updateSettings,
+            onUseSystemTts = vm::useSystemTts,
+            onUseVitsTts = vm::useVitsTts,
+            onCancelDownload = vm::cancelVitsDownload,
+            onDeleteModel = vm::deleteVitsModel,
+            onClose = { showSettings = false },
+        )
+    }
 
     if (showSleepTimer) {
         SleepTimerDialog(
@@ -665,10 +680,16 @@ private fun SleepTimerDialog(
 @Composable
 private fun SettingsDialog(
     current: ReaderSettingsEntity,
+    modelState: VitsModelState,
     onChange: (ReaderSettingsEntity) -> Unit,
+    onUseSystemTts: () -> Unit,
+    onUseVitsTts: () -> Unit,
+    onCancelDownload: () -> Unit,
+    onDeleteModel: () -> Unit,
     onClose: () -> Unit,
 ) {
-    var value by remember(current) { mutableStateOf(current) }
+    var value by remember { mutableStateOf(current) }
+    var confirmDownload by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onClose,
         title = { Text("阅读设置") },
@@ -680,6 +701,31 @@ private fun SettingsDialog(
                 Slider(value.lineHeight, { value = value.copy(lineHeight = it) }, valueRange = 1.2f..2.2f)
                 Text("朗读速度 ${"%.1f".format(value.speechRate)}")
                 Slider(value.speechRate, { value = value.copy(speechRate = it) }, valueRange = .5f..2f)
+                Text("朗读引擎")
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TextButton(onClick = onUseSystemTts) {
+                        Text(if (current.ttsEngine == MainViewModel.TTS_ENGINE_SYSTEM) "✓ 系统 TTS" else "系统 TTS")
+                    }
+                    TextButton(onClick = {
+                        if (modelState.status == VitsModelStatus.READY) onUseVitsTts()
+                        else confirmDownload = true
+                    }) {
+                        Text(if (current.ttsEngine == MainViewModel.TTS_ENGINE_VITS) "✓ 内置 VITS" else "内置 VITS")
+                    }
+                }
+                when (modelState.status) {
+                    VitsModelStatus.DOWNLOADING -> {
+                        Text("模型下载中 ${modelState.progress}%")
+                        TextButton(onClick = onCancelDownload) { Text("取消下载") }
+                    }
+                    VitsModelStatus.READY ->
+                        TextButton(onClick = onDeleteModel) { Text("删除内置模型（释放约 124 MB）") }
+                    VitsModelStatus.FAILED -> {
+                        Text(modelState.error ?: "模型下载失败", color = MaterialTheme.colorScheme.error)
+                        TextButton(onClick = { confirmDownload = true }) { Text("重试下载") }
+                    }
+                    VitsModelStatus.NOT_DOWNLOADED -> Text("模型未下载")
+                }
                 Text("主题")
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf("SYSTEM" to "跟随系统", "LIGHT" to "亮色", "DARK" to "深色").forEach { (id, label) ->
@@ -691,12 +737,25 @@ private fun SettingsDialog(
             }
         },
         confirmButton = {
-            Button(onClick = { onChange(value); onClose() }) { Text("保存") }
+            Button(onClick = { onChange(value.copy(ttsEngine = current.ttsEngine)); onClose() }) { Text("保存") }
         },
         dismissButton = {
             TextButton(onClick = onClose) { Text("取消") }
         },
     )
+    if (confirmDownload) {
+        AlertDialog(
+            onDismissRequest = { confirmDownload = false },
+            title = { Text("下载内置语音模型") },
+            text = { Text("需要下载${VitsModelManager.MODEL_SIZE_LABEL}，允许使用 Wi‑Fi 或移动网络。下载完成后将自动切换到内置 VITS。") },
+            confirmButton = {
+                Button(onClick = { confirmDownload = false; onUseVitsTts() }) { Text("下载") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDownload = false }) { Text("取消") }
+            },
+        )
+    }
 }
 
 @Composable
