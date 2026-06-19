@@ -1,8 +1,12 @@
 package com.example.epubreader
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.BitmapFactory
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -72,6 +76,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -269,6 +274,13 @@ private fun ReaderScreen(
     var showSettings by remember { mutableStateOf(false) }
     var showSleepTimer by remember { mutableStateOf(false) }
     val lifecycle = LocalLifecycleOwner.current
+    val context = LocalContext.current
+    val window = context.findActivity()?.window
+    val chapters = state.parsed?.chapters.orEmpty()
+    val currentChapterIndex = position.chapterIndex.coerceIn(chapters.indicesOrZero())
+    val contentsListState = remember(state.book?.id) {
+        LazyListState(firstVisibleItemIndex = currentChapterIndex)
+    }
 
     DisposableEffect(lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
@@ -277,7 +289,13 @@ private fun ReaderScreen(
         lifecycle.lifecycle.addObserver(observer)
         onDispose {
             vm.persistCurrent()
-        lifecycle.lifecycle.removeObserver(observer)
+            lifecycle.lifecycle.removeObserver(observer)
+        }
+    }
+    DisposableEffect(window) {
+        window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
     }
     BackHandler {
@@ -313,6 +331,11 @@ private fun ReaderScreen(
                     vm.visibleSentence(visibleSentence.sentence)
                 }
             }
+        }
+    }
+    LaunchedEffect(showContents, currentChapterIndex, chapters.size) {
+        if (showContents && chapters.isNotEmpty()) {
+            contentsListState.scrollToItem(currentChapterIndex)
         }
     }
 
@@ -378,17 +401,32 @@ private fun ReaderScreen(
             onDismissRequest = { showContents = false },
             title = { Text("目录") },
             text = {
-                LazyColumn {
-                    itemsIndexed(state.parsed?.chapters.orEmpty()) { index, item ->
+                LazyColumn(state = contentsListState) {
+                    itemsIndexed(chapters) { index, item ->
+                        val selected = index == currentChapterIndex
                         Text(
                             item.title,
                             Modifier
                                 .fillMaxWidth()
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(
+                                    if (selected) {
+                                        MaterialTheme.colorScheme.primaryContainer
+                                    } else {
+                                        Color.Transparent
+                                    },
+                                )
                                 .clickable {
                                     vm.selectChapter(index)
                                     showContents = false
                                 }
                                 .padding(12.dp),
+                            color = if (selected) {
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
                         )
                     }
                 }
@@ -475,6 +513,15 @@ private fun ReaderBottomBar(
 private fun LazyListState.isItemVisible(itemIndex: Int): Boolean {
     val visible = layoutInfo.visibleItemsInfo
     return visible.any { it.index == itemIndex }
+}
+
+private fun <T> List<T>.indicesOrZero(): IntRange =
+    if (isEmpty()) 0..0 else indices
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
 
 private data class VisibleSentenceSnapshot(
