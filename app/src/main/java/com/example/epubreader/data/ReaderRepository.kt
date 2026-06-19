@@ -30,39 +30,48 @@ class ReaderRepository(
     suspend fun import(uri: Uri): BookEntity {
         val dir = File(context.filesDir, "books").apply { mkdirs() }
         val temp = File.createTempFile("import-", ".epub", dir)
-        val digest = MessageDigest.getInstance("SHA-256")
-        context.contentResolver.openInputStream(uri)?.use { input ->
-            temp.outputStream().use { output ->
-                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                while (true) {
-                    val read = input.read(buffer)
-                    if (read < 0) break
-                    digest.update(buffer, 0, read)
-                    output.write(buffer, 0, read)
+        var importedFile: File? = null
+        var keepImportedFile = false
+        try {
+            val digest = MessageDigest.getInstance("SHA-256")
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                temp.outputStream().use { output ->
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        digest.update(buffer, 0, read)
+                        output.write(buffer, 0, read)
+                    }
                 }
-            }
-        } ?: error("无法读取所选文件")
-        val id = digest.digest().joinToString("") { "%02x".format(it) }.take(24)
-        val file = File(dir, "$id.epub")
-        if (file.exists()) {
-            temp.delete()
-        } else {
-            if (!temp.renameTo(file)) {
-                temp.copyTo(file, overwrite = true)
+            } ?: error("无法读取所选文件")
+            val id = digest.digest().joinToString("") { "%02x".format(it) }.take(24)
+            val file = File(dir, "$id.epub")
+            val alreadyImported = file.exists()
+            if (alreadyImported) {
                 temp.delete()
+            } else if (!temp.renameTo(file)) {
+                temp.copyTo(file, overwrite = true)
             }
+            importedFile = file.takeUnless { alreadyImported }
+            val parsed = parser.parse(file)
+            cacheParsed(id, parsed)
+            val coverPath = saveCover(id, file, parsed.cover)
+            return BookEntity(
+                id = id,
+                title = parsed.title,
+                author = parsed.author,
+                localPath = file.absolutePath,
+                coverPath = coverPath,
+                importedAt = System.currentTimeMillis(),
+            ).also {
+                dao.saveBook(it)
+                keepImportedFile = true
+            }
+        } finally {
+            temp.delete()
+            if (!keepImportedFile) importedFile?.delete()
         }
-        val parsed = parser.parse(file)
-        cacheParsed(id, parsed)
-        val coverPath = saveCover(id, file, parsed.cover)
-        return BookEntity(
-            id = id,
-            title = parsed.title,
-            author = parsed.author,
-            localPath = file.absolutePath,
-            coverPath = coverPath,
-            importedAt = System.currentTimeMillis(),
-        ).also { dao.saveBook(it) }
     }
 
     suspend fun book(id: String) = dao.book(id)
@@ -125,9 +134,9 @@ class ReaderRepository(
         parsed: ParsedBook,
         chapterIndex: Int,
         sentenceIndex: Int,
-    ): Int {
+    ): Float {
         val index = progressIndex(parsed)
-        if (index.total <= 0) return 0
+        if (index.total <= 0) return 0f
         val safeChapterIndex = chapterIndex.coerceIn(0, parsed.chapters.lastIndex)
         val currentCount = index.chapterCounts.getOrElse(safeChapterIndex) { 0 }
         val completedBeforeChapter = index.completedBeforeChapter.getOrElse(safeChapterIndex) { 0 }
@@ -137,26 +146,26 @@ class ReaderRepository(
         return percentFromIndex(globalIndex, index.total)
     }
 
-    fun progressPercent(parsed: ParsedBook, locator: ReadingLocatorEntity?): Int {
-        if (locator == null) return 0
+    fun progressPercent(parsed: ParsedBook, locator: ReadingLocatorEntity?): Float {
+        if (locator == null) return 0f
         val chapterIndex = parsed.chapters.indexOfFirst { it.path == locator.chapterPath }
-        if (chapterIndex < 0) return 0
+        if (chapterIndex < 0) return 0f
         val sentenceIndex = cachedSentences(parsed.chapters[chapterIndex]).indexOfFirst {
             it.paragraphIndex == locator.paragraphIndex && it.sentenceIndex == locator.sentenceIndex
         }
-        if (sentenceIndex < 0) return 0
+        if (sentenceIndex < 0) return 0f
         return progressPercent(parsed, chapterIndex, sentenceIndex)
     }
 
     private fun commonPrefix(a: String, b: String): Int =
         a.zip(b).takeWhile { (left, right) -> left == right }.size
 
-    private fun percentFromIndex(globalIndex: Int, total: Int): Int =
+    private fun percentFromIndex(globalIndex: Int, total: Int): Float =
         if (total <= 1) {
-            100
+            100f
         } else {
-            ((globalIndex.coerceIn(0, total - 1) * 100f) / (total - 1)).toInt()
-                .coerceIn(0, 100)
+            ((globalIndex.coerceIn(0, total - 1) * 100f) / (total - 1))
+                .coerceIn(0f, 100f)
         }
 
     private fun cacheParsed(bookId: String, parsed: ParsedBook) {

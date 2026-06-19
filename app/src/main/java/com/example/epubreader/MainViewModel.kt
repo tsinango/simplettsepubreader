@@ -220,16 +220,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun persistCurrent(source: String = "UI") = viewModelScope.launch {
+        persistCurrentNow(source)
+    }
+
+    private suspend fun persistCurrentNow(source: String) {
         val state = _reader.value
         val position = _readerPosition.value
-        val bookId = state.book?.id ?: return@launch
-        val parsed = state.parsed ?: return@launch
-        val sentence = state.sentences.getOrNull(position.sentenceIndex) ?: return@launch
+        val bookId = state.book?.id ?: return
+        val parsed = state.parsed ?: return
+        if (position.chapterIndex != state.chapterIndex) return
+        val sentence = state.sentences.getOrNull(position.sentenceIndex) ?: return
         repository.saveProgress(bookId, sentence, source)
         val progress = progressForPosition(parsed, position.chapterIndex, position.sentenceIndex)
+        val currentPosition = _readerPosition.value
+        if (_reader.value.book?.id != bookId ||
+            currentPosition.chapterIndex != position.chapterIndex ||
+            currentPosition.sentenceIndex != position.sentenceIndex
+        ) {
+            return
+        }
         val next = _reader.value.copy(progress = progress)
         _reader.value = next
-        _readerPosition.value = position.copy(progress = progress)
+        _readerPosition.value = currentPosition.copy(progress = progress)
         updateBookProgressFromReader(next)
     }
 
@@ -248,14 +260,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             expireSleepTimer()
             return
         }
-        persistCurrent()
-        val state = _reader.value
-        val bookId = state.book?.id ?: return
-        val intent = Intent(getApplication(), ReaderTtsService::class.java).apply {
-            action = ReaderTtsService.ACTION_PLAY
-            putExtra(ReaderTtsService.EXTRA_BOOK_ID, bookId)
+        viewModelScope.launch {
+            persistCurrentNow("UI")
+            val bookId = _reader.value.book?.id ?: return@launch
+            val intent = Intent(getApplication(), ReaderTtsService::class.java).apply {
+                action = ReaderTtsService.ACTION_PLAY
+                putExtra(ReaderTtsService.EXTRA_BOOK_ID, bookId)
+            }
+            getApplication<Application>().startForegroundService(intent)
         }
-        getApplication<Application>().startForegroundService(intent)
     }
 
     fun pause() = sendAction(ReaderTtsService.ACTION_PAUSE)
@@ -560,13 +573,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         chapterIndex: Int,
         sentenceIndex: Int,
     ): Float =
-        repository.progressPercent(parsed, chapterIndex, sentenceIndex).toFloat()
+        repository.progressPercent(parsed, chapterIndex, sentenceIndex)
 
     private suspend fun progressForLocator(
         parsed: ParsedBook,
         locator: ReadingLocatorEntity?,
     ): Float =
-        repository.progressPercent(parsed, locator).toFloat()
+        repository.progressPercent(parsed, locator)
 
     fun currentChapter(): Chapter? = _reader.value.parsed?.chapters?.getOrNull(_reader.value.chapterIndex)
 

@@ -58,6 +58,12 @@ android {
             if (hasFixedDebugSigning) {
                 signingConfig = signingConfigs.getByName("fixedDebug")
             }
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 
