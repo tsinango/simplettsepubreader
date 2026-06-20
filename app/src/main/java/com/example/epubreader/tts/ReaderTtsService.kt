@@ -88,21 +88,27 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private var lastChunkFinishedAt = 0L
     private var lastGapMillis = 0L
     @Volatile private var thermalStatus = PowerManager.THERMAL_STATUS_NONE
+    @Volatile private var engineThreads = 4
     private var speechRate = 1f
     private var lastSavedKey: String? = null
     private var lastBroadcastState: String? = null
     private var hasAudioFocus = false
     private val thermalListener = PowerManager.OnThermalStatusChangedListener { status ->
         thermalStatus = status
-        DiagnosticLogger.event("TTS_THERMAL", "status=$status")
-        if (status >= PowerManager.THERMAL_STATUS_SEVERE) {
+        val targetThreads = TtsThreadPolicy.threadsForThermal(status)
+        DiagnosticLogger.event("TTS_THERMAL", "status=$status currentThreads=$engineThreads targetThreads=$targetThreads")
+        if (TtsThreadPolicy.shouldRecreate(engineThreads, targetThreads)) {
+            val reason = TtsThreadPolicy.reason(engineThreads, targetThreads)
+            engineThreads = targetThreads
             prefetched?.audio?.cancel()
             prefetched = null
             scope.launch(Dispatchers.Default) {
                 synthesisMutex.withLock {
+                    val startedAt = SystemClock.elapsedRealtime()
                     offlineTts?.runCatching { release() }
                     offlineTts = null
-                    DiagnosticLogger.event("VITS_ENGINE", "recreate_for_thermal threads=2")
+                    val releaseMs = (SystemClock.elapsedRealtime() - startedAt)
+                    DiagnosticLogger.event("VITS_ENGINE", "recreate $reason releaseMs=$releaseMs")
                 }
             }
         }
@@ -435,7 +441,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         playing && activeEngine == MainViewModel.TTS_ENGINE_VITS && serial == embeddedGenerationSerial
 
     private fun prefetchNextChunk(serial: Int) {
-        if (thermalStatus >= PowerManager.THERMAL_STATUS_SEVERE) return
+        if (TtsThreadPolicy.threadsForThermal(thermalStatus) <= 2) return
         val next = nextChunk() ?: return
         prefetched?.audio?.cancel()
         prefetched = PrefetchedChunk(
@@ -454,8 +460,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
 
     private fun embeddedTts(): OfflineTts = offlineTts ?: run {
         val startedAt = SystemClock.elapsedRealtime()
-        val numThreads = if (thermalStatus >= PowerManager.THERMAL_STATUS_SEVERE) 2
-            else performanceStore.cpuThreads()
+        val numThreads = engineThreads
         val fstPaths = listOf(
             VitsModelManager.phoneFstFile(this).absolutePath,
             VitsModelManager.dateFstFile(this).absolutePath,

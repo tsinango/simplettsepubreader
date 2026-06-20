@@ -57,7 +57,7 @@ class TtsPerformanceStore(context: Context) {
         private const val KEY_RTF = "rtf"
         private const val KEY_PREFETCH_HIT_RATE = "prefetch_hit_rate"
         private const val KEY_GAP_MS = "gap_ms"
-        private const val MIN_CPU_THREADS = 4
-        private const val MAX_CPU_THREADS = 4
+        private const val MIN_CPU_THREADS = TtsThreadPolicy.MIN_THREADS
+        private const val MAX_CPU_THREADS = TtsThreadPolicy.MAX_THREADS
     }
 }
