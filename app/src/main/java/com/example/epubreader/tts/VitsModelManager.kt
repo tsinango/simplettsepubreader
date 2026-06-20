@@ -36,6 +36,18 @@ class VitsModelManager(private val context: Context) {
     private val workManager = WorkManager.getInstance(context)
     private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
 
+    internal data class ModelFileSpec(
+        val name: String,
+        val size: Long,
+        val sha256: String,
+    )
+
+    internal data class ModelFileStatus(
+        val spec: ModelFileSpec,
+        val file: File,
+        val valid: Boolean,
+    )
+
     val state: Flow<VitsModelState> = workManager
         .getWorkInfosForUniqueWorkFlow(WORK_NAME)
         .map { infos -> stateFrom(infos.firstOrNull()) }
@@ -95,12 +107,7 @@ class VitsModelManager(private val context: Context) {
         fun modelDir(context: Context) = File(context.filesDir, "models/vits-zh-hf-fanchen-wnj")
         fun isReady(context: Context): Boolean =
             File(modelDir(context), READY_FILE).isFile &&
-                modelFile(context).length() == MODEL_FILE_SIZE &&
-                tokensFile(context).length() == TOKENS_FILE_SIZE &&
-                lexiconFile(context).length() == LEXICON_FILE_SIZE &&
-                phoneFstFile(context).length() == PHONE_FST_SIZE &&
-                dateFstFile(context).length() == DATE_FST_SIZE &&
-                numberFstFile(context).length() == NUMBER_FST_SIZE
+                verifyModelFiles(context).all { it.valid }
         fun modelFile(context: Context) = File(modelDir(context), "vits-zh-hf-fanchen-wnj.onnx")
         fun tokensFile(context: Context) = File(modelDir(context), "tokens.txt")
         fun lexiconFile(context: Context) = File(modelDir(context), "lexicon.txt")
@@ -108,6 +115,25 @@ class VitsModelManager(private val context: Context) {
         fun dateFstFile(context: Context) = File(modelDir(context), "date.fst")
         fun numberFstFile(context: Context) = File(modelDir(context), "number.fst")
         internal fun readyFile(context: Context) = File(modelDir(context), READY_FILE)
+
+        internal fun verifyModelFiles(context: Context): List<ModelFileStatus> =
+            verifyModelFilesInDir(modelDir(context))
+
+        internal fun verifyModelFilesInDir(dir: File): List<ModelFileStatus> =
+            MODEL_SPECS.map { spec ->
+                val file = File(dir, spec.name)
+                val valid = file.isFile && file.length() == spec.size && sha256(file) == spec.sha256
+                ModelFileStatus(spec, file, valid)
+            }
+
+        internal val MODEL_SPECS: List<ModelFileSpec> = listOf(
+            ModelFileSpec("vits-zh-hf-fanchen-wnj.onnx", 121_076_185L, "ccd592a5f6fa3f7e8840405c3422ffed9eba58db253d4abd82c75280db98c644"),
+            ModelFileSpec("tokens.txt", 331L, "34b035b9aeb070df6188b022f29c00e0e142c7ade9f25611ced65db5e9cc8402"),
+            ModelFileSpec("lexicon.txt", 2_457_843L, "9af2824e49e731bf615927c768fdc36bbbe894cac57d8e0088d9c94331b07320"),
+            ModelFileSpec("phone.fst", 88_630L, "1ac2b6fa56b1442320c4de7db08353bab8963a2b57f365eebcdd3a2d3562f8d7"),
+            ModelFileSpec("date.fst", 59_154L, "eb8aa079ae3cb81d8f4404992f39d61a0cb990947512b5b8d1e54d1f6980e718"),
+            ModelFileSpec("number.fst", 64_482L, "743f402181fcfebf76cc2f0546b71fa26476e626fbe4e460fb7b4c3a7a8bd5bd"),
+        )
 
         private const val MODEL_FILE_SIZE = 121_076_185L
         private const val TOKENS_FILE_SIZE = 331L
@@ -118,6 +144,19 @@ class VitsModelManager(private val context: Context) {
         private const val PHONE_FST_SHA256 = "1ac2b6fa56b1442320c4de7db08353bab8963a2b57f365eebcdd3a2d3562f8d7"
         private const val DATE_FST_SHA256 = "eb8aa079ae3cb81d8f4404992f39d61a0cb990947512b5b8d1e54d1f6980e718"
         private const val NUMBER_FST_SHA256 = "743f402181fcfebf76cc2f0546b71fa26476e626fbe4e460fb7b4c3a7a8bd5bd"
+
+        internal fun sha256(file: File): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            FileInputStream(file).use { input ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    digest.update(buffer, 0, count)
+                }
+            }
+            return digest.digest().joinToString("") { "%02x".format(it) }
+        }
     }
 }
 
@@ -127,13 +166,19 @@ class VitsModelDownloadWorker(
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val dir = VitsModelManager.modelDir(applicationContext).apply { mkdirs() }
-        if (dir.usableSpace < VitsModelManager.MODEL_SIZE_BYTES + 32L * 1024 * 1024) {
-            return@withContext failure("存储空间不足，需要至少 160 MB 可用空间")
-        }
         VitsModelManager.readyFile(applicationContext).delete()
-        var completed = 0L
+        val fileStatuses = VitsModelManager.verifyModelFiles(applicationContext)
+        val missingOrCorrupt = fileStatuses.filter { !it.valid }
+        val requiredBytes = missingOrCorrupt.sumOf { it.spec.size } + 32L * 1024 * 1024
+        if (missingOrCorrupt.isNotEmpty() && dir.usableSpace < requiredBytes) {
+            val missingLabel = missingOrCorrupt.joinToString(", ") { it.spec.name }
+            return@withContext failure(
+                "存储空间不足，需要至少 ${requiredBytes / (1024 * 1024)} MB 用于补下载：$missingLabel",
+            )
+        }
+        var completed = fileStatuses.filter { it.valid }.sumOf { it.spec.size }
         try {
-            FILES.forEach { spec ->
+            VitsModelManager.MODEL_SPECS.forEach { spec ->
                 download(spec, File(dir, spec.name), completed)
                 completed += spec.size
             }
@@ -148,8 +193,8 @@ class VitsModelDownloadWorker(
         }
     }
 
-    private suspend fun download(spec: ModelFile, target: File, completedBefore: Long) {
-        if (target.isFile && target.length() == spec.size && sha256(target) == spec.sha256) return
+    private suspend fun download(spec: VitsModelManager.ModelFileSpec, target: File, completedBefore: Long) {
+        if (target.isFile && target.length() == spec.size && VitsModelManager.sha256(target) == spec.sha256) return
         val partial = File(target.parentFile, "${target.name}.part")
         var downloaded = partial.takeIf { it.isFile }?.length()?.coerceAtMost(spec.size) ?: 0L
         if (partial.length() > spec.size) {
@@ -157,7 +202,7 @@ class VitsModelDownloadWorker(
             downloaded = 0L
         }
         if (downloaded == spec.size) {
-            if (sha256(partial) == spec.sha256) {
+            if (VitsModelManager.sha256(partial) == spec.sha256) {
                 if (target.exists()) target.delete()
                 check(partial.renameTo(target)) { "无法保存 ${spec.name}" }
                 return
@@ -209,7 +254,7 @@ class VitsModelDownloadWorker(
             partial.delete()
             error("${spec.name} 文件大小不正确")
         }
-        if (sha256(partial) != spec.sha256) {
+        if (VitsModelManager.sha256(partial) != spec.sha256) {
             partial.delete()
             error("${spec.name} 校验失败")
         }
@@ -217,34 +262,11 @@ class VitsModelDownloadWorker(
         check(partial.renameTo(target)) { "无法保存 ${spec.name}" }
     }
 
-    private fun sha256(file: File): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        FileInputStream(file).use { input ->
-            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-            while (true) {
-                val count = input.read(buffer)
-                if (count < 0) break
-                digest.update(buffer, 0, count)
-            }
-        }
-        return digest.digest().joinToString("") { "%02x".format(it) }
-    }
-
     private fun failure(message: String) = Result.failure(Data.Builder().putString(VitsModelManager.KEY_ERROR, message).build())
-
-    private data class ModelFile(val name: String, val size: Long, val sha256: String)
 
     companion object {
         private const val REVISION = "75a59ed26f999226f412eb9e1dff31c86b42f082"
         private const val BASE_URL =
             "https://huggingface.co/csukuangfj/vits-zh-hf-fanchen-wnj/resolve/$REVISION"
-        private val FILES = listOf(
-            ModelFile("vits-zh-hf-fanchen-wnj.onnx", 121_076_185, "ccd592a5f6fa3f7e8840405c3422ffed9eba58db253d4abd82c75280db98c644"),
-            ModelFile("tokens.txt", 331, "34b035b9aeb070df6188b022f29c00e0e142c7ade9f25611ced65db5e9cc8402"),
-            ModelFile("lexicon.txt", 2_457_843, "9af2824e49e731bf615927c768fdc36bbbe894cac57d8e0088d9c94331b07320"),
-            ModelFile("phone.fst", 88_630, "1ac2b6fa56b1442320c4de7db08353bab8963a2b57f365eebcdd3a2d3562f8d7"),
-            ModelFile("date.fst", 59_154, "eb8aa079ae3cb81d8f4404992f39d61a0cb990947512b5b8d1e54d1f6980e718"),
-            ModelFile("number.fst", 64_482, "743f402181fcfebf76cc2f0546b71fa26476e626fbe4e460fb7b4c3a7a8bd5bd"),
-        )
     }
 }
