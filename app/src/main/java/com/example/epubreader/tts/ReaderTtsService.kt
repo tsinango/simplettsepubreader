@@ -365,9 +365,11 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
             if (!isGenerationCurrent(serial)) return@withLock null
             val engine = withContext(Dispatchers.Default) { embeddedTts() }
             val startedAt = SystemClock.elapsedRealtime()
+            val engineSpeed = vitsEngineSpeed(speechRate)
             DiagnosticLogger.event(
                 "VITS_GENERATE",
-                "start serial=$serial chunk=${chunk.index} length=${chunk.text.length} rate=$speechRate",
+                "start serial=$serial chunk=${chunk.index} length=${chunk.text.length} " +
+                    "rate=$speechRate engineSpeed=$engineSpeed",
             )
             val audio = withContext(Dispatchers.Default) {
                 // Chunks are deliberately bounded, so direct generation remains cancellable at
@@ -375,7 +377,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                 // Some vendor runtimes terminate the process in that callback path.
                 engine.generate(
                     text = chunk.text,
-                    speed = (1f / speechRate).coerceIn(0.25f, 3.33f),
+                    speed = engineSpeed,
                 )
             }
             if (!isGenerationCurrent(serial) || audio.samples.isEmpty()) return@withLock null
@@ -599,6 +601,9 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private fun actualSpeechRate(userRate: Float): Float =
         (if (userRate <= 1f) userRate else 1f + (userRate - 1f) * 2.5f)
             .coerceIn(0.3f, 4f)
+
+    private fun vitsEngineSpeed(rate: Float): Float =
+        (VITS_NORMAL_SPEED / rate.coerceAtLeast(0.1f)).coerceIn(0.05f, 1f)
 
     private fun stopCurrentAudio() {
         DiagnosticLogger.event(
@@ -835,6 +840,9 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         private const val PLAYBACK_COMPLETION_GRACE_MS = 500L
         private const val PLAYBACK_POLL_INTERVAL_MS = 20L
         private const val STREAM_WRITE_FRAMES = 4096
+        // This model's native speed=1 output is much slower than normal narration. Diagnostics
+        // show that speed=0.357 still produces only about 2.5 Chinese characters per second.
+        private const val VITS_NORMAL_SPEED = 0.2f
         private val NATIVE_CLEANUP_SCOPE = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     }
 }
