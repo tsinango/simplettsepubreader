@@ -37,6 +37,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -78,7 +79,10 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private var lastChunkFinishedAt = 0L
     private var lastGapMillis = 0L
     @Volatile private var thermalStatus = PowerManager.THERMAL_STATUS_NONE
-    @Volatile private var engineThreads = 4
+    private lateinit var thermalController: ThermalThreadController
+    private val engineThreads: Int get() = thermalController.engineThreads
+    private var recoveryJob: Job? = null
+    private var engineRecreateJob: Job? = null
     private var speechRate = 1f
     private var lastSavedKey: String? = null
     private var lastBroadcastState: String? = null
@@ -86,32 +90,28 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private val audioPreferences by lazy {
         getSharedPreferences("tts_audio", Context.MODE_PRIVATE)
     }
+    private val serviceClock = object : Clock {
+        override fun elapsedRealtimeMillis(): Long = SystemClock.elapsedRealtime()
+        override fun currentThermalStatus(): Int = powerManager.currentThermalStatus
+    }
     private var floatPcmSupported: Boolean
         get() = audioPreferences.getBoolean(KEY_FLOAT_PCM_SUPPORTED, true)
         set(value) = audioPreferences.edit().putBoolean(KEY_FLOAT_PCM_SUPPORTED, value).apply()
 
     private val thermalListener = PowerManager.OnThermalStatusChangedListener { status ->
         thermalStatus = status
-        val targetThreads = TtsThreadPolicy.threadsForThermal(status)
-        DiagnosticLogger.event("TTS_THERMAL", "status=$status currentThreads=$engineThreads targetThreads=$targetThreads")
-        if (TtsThreadPolicy.shouldRecreate(engineThreads, targetThreads)) {
-            val reason = TtsThreadPolicy.reason(engineThreads, targetThreads)
-            engineThreads = targetThreads
-            embeddedGenerationSerial++
-            generationJob?.cancel()
-            pipeline.stopPlayback()
-            scope.launch(Dispatchers.Default) {
-                synthesisMutex.withLock {
-                    val startedAt = SystemClock.elapsedRealtime()
-                    offlineTts?.runCatching { release() }
-                    offlineTts = null
-                    val releaseMs = (SystemClock.elapsedRealtime() - startedAt)
-                    DiagnosticLogger.event("VITS_ENGINE", "recreate $reason releaseMs=$releaseMs")
-                }
-                if (playing && activeEngine == MainViewModel.TTS_ENGINE_VITS) {
-                    withContext(Dispatchers.Main) { speakCurrent() }
-                }
-            }
+        val action = thermalController.onThermalStatusChanged(status)
+        DiagnosticLogger.event(
+            "TTS_THERMAL",
+            "status=$status currentThreads=${thermalController.engineThreads} " +
+                "targetThreads=${thermalController.targetEngineThreads} action=$action",
+        )
+        when (action) {
+            is ThermalAction.Downgrade -> handleThermalDowngrade(action.from, action.to)
+            is ThermalAction.StartRecovery -> scheduleRecovery(action.deadlineAt)
+            ThermalAction.NoChange -> Unit
+            is ThermalAction.StillRecovering -> Unit
+            is ThermalAction.Upgrade -> Unit
         }
     }
     private val audioFocusRequest by lazy {
@@ -129,12 +129,77 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
             .build()
     }
 
+    private fun handleThermalDowngrade(from: Int, to: Int) {
+        val reason = TtsThreadPolicy.reason(from, to)
+        embeddedGenerationSerial++
+        generationJob?.cancel()
+        recoveryJob?.cancel()
+        recoveryJob = null
+        pipeline.stopPlayback()
+        scope.launch(Dispatchers.Default) {
+            synthesisMutex.withLock {
+                val startedAt = SystemClock.elapsedRealtime()
+                offlineTts?.runCatching { release() }
+                offlineTts = null
+                val releaseMs = (SystemClock.elapsedRealtime() - startedAt)
+                DiagnosticLogger.event("VITS_ENGINE", "recreate $reason releaseMs=$releaseMs")
+            }
+            thermalController.commitEngineThreads(to)
+            if (playing && activeEngine == MainViewModel.TTS_ENGINE_VITS) {
+                withContext(Dispatchers.Main) { speakCurrent() }
+            }
+        }
+    }
+
+    private fun scheduleRecovery(deadlineAt: Long) {
+        recoveryJob?.cancel()
+        recoveryJob = scope.launch(Dispatchers.Default) {
+            val now = SystemClock.elapsedRealtime()
+            val waitMs = (deadlineAt - now).coerceAtLeast(0)
+            delay(waitMs)
+            val action = thermalController.tickRecovery()
+            DiagnosticLogger.event(
+                "TTS_THERMAL",
+                "recovery_tick action=$action threads=${thermalController.engineThreads}",
+            )
+            if (action is ThermalAction.Upgrade) {
+                recreateEngineForUpgrade(action.toThreads)
+            }
+        }
+    }
+
+    private suspend fun recreateEngineForUpgrade(targetThreads: Int) {
+        if (engineRecreateJob?.isActive == true) return
+        engineRecreateJob = scope.launch(Dispatchers.Default) {
+            embeddedGenerationSerial++
+            generationJob?.cancel()
+            pipeline.stopPlayback()
+            synthesisMutex.withLock {
+                val startedAt = SystemClock.elapsedRealtime()
+                offlineTts?.runCatching { release() }
+                offlineTts = null
+                val releaseMs = (SystemClock.elapsedRealtime() - startedAt)
+                DiagnosticLogger.event(
+                    "VITS_ENGINE",
+                    "recreate thermal_upgrade ${engineThreads}t->$targetThreads releaseMs=$releaseMs",
+                )
+            }
+            thermalController.commitEngineThreads(targetThreads)
+            if (playing && activeEngine == MainViewModel.TTS_ENGINE_VITS) {
+                withContext(Dispatchers.Main) { speakCurrent() }
+            }
+        }
+        engineRecreateJob?.join()
+    }
+
     override fun onCreate() {
         super.onCreate()
         repository = (application as ReaderApplication).repository
         audioManager = getSystemService(AudioManager::class.java)
         powerManager = getSystemService(PowerManager::class.java)
         thermalStatus = powerManager.currentThermalStatus
+        thermalController = ThermalThreadController(serviceClock)
+        thermalController.initialize(thermalStatus)
         powerManager.addThermalStatusListener(mainExecutor, thermalListener)
         performanceStore = TtsPerformanceStore(this)
         pipeline = EmbeddedPlaybackPipeline(
@@ -422,7 +487,9 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                 engine.generateWithConfigAndCallback(
                     chunk.text,
                     genConfig,
-                ) { if (job?.isActive == true && isGenerationCurrent(serial)) 1 else 0 }
+                ) {
+                    if (job?.isActive == true && isGenerationCurrent(serial)) 1 else 0
+                }
             }
             if (!isGenerationCurrent(serial) || generated.samples.isEmpty()) return@withLock null
             val silenceSamples = chunk.pauseMs * generated.sampleRate / 1000
@@ -744,6 +811,8 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         releaseWakeLock()
         tts?.shutdown()
         powerManager.removeThermalStatusListener(thermalListener)
+        recoveryJob?.cancel()
+        engineRecreateJob?.cancel()
         scope.cancel()
         // generate() is a blocking JNI call and cannot be cancelled while native code is active.
         // Releasing OfflineTts concurrently can invalidate its native handle and terminate the
