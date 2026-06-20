@@ -69,13 +69,19 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private var audioTrack: AudioTrack? = null
     private var audioWriteJob: Job? = null
     private var playbackCompletionJob: Job? = null
+    private var wakeLock: PowerManager.WakeLock? = null
     @Volatile private var embeddedGenerationSerial = 0
     private var synthesisChunks: List<SynthesisChunk> = emptyList()
     private var synthesisChunkIndex = 0
     private var prefetched: PrefetchedChunk? = null
     private val synthesisMutex = Mutex()
+    private val commandMutex = Mutex()
     private var generatedChunks = 0
     private var prefetchHits = 0
+    private var prefetchRequests = 0
+    private var lastEngineInitMillis = 0L
+    private var lastFirstAudioMillis = 0L
+    private var playbackRequestedAt = 0L
     private var lastGenerationMillis = 0L
     private var lastRealTimeFactor = 0f
     private var lastChunkFinishedAt = 0L
@@ -91,6 +97,13 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         if (status >= PowerManager.THERMAL_STATUS_SEVERE) {
             prefetched?.audio?.cancel()
             prefetched = null
+            scope.launch(Dispatchers.Default) {
+                synthesisMutex.withLock {
+                    offlineTts?.runCatching { release() }
+                    offlineTts = null
+                    DiagnosticLogger.event("VITS_ENGINE", "recreate_for_thermal threads=2")
+                }
+            }
         }
     }
     private val audioFocusRequest by lazy {
@@ -103,7 +116,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
             )
             .setOnAudioFocusChangeListener {
                 DiagnosticLogger.event("TTS_FOCUS", "change=$it")
-                if (it < 0) pause()
+                if (it < 0) scope.launch { commandMutex.withLock { pause() } }
             }
             .build()
     }
@@ -150,13 +163,13 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         when (intent?.action) {
             ACTION_PLAY -> {
                 startForeground(NOTIFICATION_ID, notification("正在准备朗读"))
-                scope.launch { loadAndPlay() }
+                scope.launch { commandMutex.withLock { loadAndPlay() } }
             }
-            ACTION_PAUSE -> pause()
-            ACTION_NEXT -> scope.launch { move(1) }
-            ACTION_PREVIOUS -> scope.launch { move(-1) }
-            ACTION_SETTINGS_CHANGED -> scope.launch { reloadSettings() }
-            ACTION_STOP -> stopPlayback()
+            ACTION_PAUSE -> scope.launch { commandMutex.withLock { pause() } }
+            ACTION_NEXT -> scope.launch { commandMutex.withLock { move(1) } }
+            ACTION_PREVIOUS -> scope.launch { commandMutex.withLock { move(-1) } }
+            ACTION_SETTINGS_CHANGED -> scope.launch { commandMutex.withLock { reloadSettings() } }
+            ACTION_STOP -> scope.launch { commandMutex.withLock { stopPlayback() } }
         }
         return START_NOT_STICKY
     }
@@ -176,6 +189,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         )
         if (!initialized && playing && activeEngine == MainViewModel.TTS_ENGINE_SYSTEM) {
             playing = false
+            releaseWakeLock()
             broadcastState()
             updateNotification("系统朗读引擎不可用")
         } else if (playing && activeEngine == MainViewModel.TTS_ENGINE_SYSTEM) {
@@ -185,12 +199,18 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
 
     private suspend fun loadAndPlay() {
         val id = bookId ?: return
+        playbackRequestedAt = SystemClock.elapsedRealtime()
+        lastFirstAudioMillis = 0
+        generatedChunks = 0
+        prefetchHits = 0
+        prefetchRequests = 0
         DiagnosticLogger.event("TTS_PLAY", "load book=${DiagnosticLogger.bookToken(id)}")
         val parsedBook = ensureBook(id) ?: return stopPlayback()
         stopCurrentAudio()
         val locator = repository.locator(id)
         positionFromLocator(parsedBook, locator)
         playing = true
+        acquireWakeLock()
         applySettings()
         broadcastState()
         if (activeEngine == MainViewModel.TTS_ENGINE_VITS || initialized) speakCurrent()
@@ -247,7 +267,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private suspend fun applySettings() {
         val settings = repository.settings.first()
         activeEngine = settings?.ttsEngine ?: MainViewModel.TTS_ENGINE_SYSTEM
-        speechRate = actualSpeechRate(settings?.speechRate ?: 1f)
+        speechRate = TtsRatePolicy.userRate(settings?.speechRate ?: 1f)
         DiagnosticLogger.event(
             "TTS_SETTINGS",
             "engine=$activeEngine rate=$speechRate pitch=${settings?.pitch ?: 1f}",
@@ -268,8 +288,10 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private suspend fun speakCurrent() {
         val id = bookId ?: return
         val sentence = chapterSentences.getOrNull(sentenceIndex) ?: return stopPlayback()
+        acquireWakeLock()
         if (!ensureAudioFocus()) {
             playing = false
+            releaseWakeLock()
             broadcastState()
             return updateNotification("等待音频控制权")
         }
@@ -303,6 +325,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         ) return
         playing = false
         currentUtteranceId = null
+        releaseWakeLock()
         abandonAudioFocus()
         broadcastState()
         val message = "系统 TTS 朗读失败（错误码 $errorCode），请安装对应语言的语音包或切换到内置 VITS"
@@ -372,11 +395,9 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                     "rate=$speechRate engineSpeed=$engineSpeed",
             )
             val audio = withContext(Dispatchers.Default) {
-                // Chunks are deliberately bounded, so direct generation remains cancellable at
-                // chunk boundaries without repeatedly crossing JNI from a native worker thread.
-                // Some vendor runtimes terminate the process in that callback path.
                 engine.generate(
                     text = chunk.text,
+                    sid = 0,
                     speed = engineSpeed,
                 )
             }
@@ -411,6 +432,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
             serial = serial,
             audio = scope.async(Dispatchers.Default) { synthesizeChunk(next, serial) },
         )
+        prefetchRequests++
     }
 
     private fun nextChunk(): SynthesisChunk? {
@@ -419,7 +441,9 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         return SynthesisChunker.split(nextSentence.key(), nextSentence.text).firstOrNull()
     }
 
-    private fun embeddedTts(): OfflineTts = offlineTts ?: OfflineTts(
+    private fun embeddedTts(): OfflineTts = offlineTts ?: run {
+        val startedAt = SystemClock.elapsedRealtime()
+        OfflineTts(
         config = OfflineTtsConfig(
             model = OfflineTtsModelConfig(
                 vits = OfflineTtsVitsModelConfig(
@@ -434,16 +458,18 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                 },
             ),
         ),
-    ).also {
+        ).also {
+        lastEngineInitMillis = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(1)
         offlineTts = it
         DiagnosticLogger.event(
             "VITS_ENGINE",
-            "created threads=${if (thermalStatus >= PowerManager.THERMAL_STATUS_SEVERE) 2 else performanceStore.cpuThreads()} " +
+            "created initMs=$lastEngineInitMillis threads=${if (thermalStatus >= PowerManager.THERMAL_STATUS_SEVERE) 2 else performanceStore.cpuThreads()} " +
                 "modelReady=${VitsModelManager.isReady(this)} " +
                 "modelBytes=${VitsModelManager.modelFile(this).length()} " +
                 "tokensBytes=${VitsModelManager.tokensFile(this).length()} " +
                 "lexiconBytes=${VitsModelManager.lexiconFile(this).length()}",
         )
+    }
     }
 
     private suspend fun playEmbeddedAudio(audio: SynthesizedAudio, serial: Int) {
@@ -503,6 +529,9 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         updateNotification(chapterSentences.getOrNull(sentenceIndex)?.text?.take(80).orEmpty())
         track.play()
         val playbackStartedAt = SystemClock.elapsedRealtime()
+        if (lastFirstAudioMillis == 0L && playbackRequestedAt > 0L) {
+            lastFirstAudioMillis = (playbackStartedAt - playbackRequestedAt).coerceAtLeast(0)
+        }
         DiagnosticLogger.event("AUDIO_TRACK", "playing serial=$serial frames=${pcm.size}")
         val expectedMillis = pcm.size * 1000L / audio.sampleRate.coerceAtLeast(1)
         audioWriteJob = scope.launch(Dispatchers.IO) {
@@ -594,16 +623,13 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
             speakCurrent()
         } else {
             playing = false
+            releaseWakeLock()
             broadcastState()
         }
     }
 
-    private fun actualSpeechRate(userRate: Float): Float =
-        (if (userRate <= 1f) userRate else 1f + (userRate - 1f) * 2.5f)
-            .coerceIn(0.3f, 4f)
-
     private fun vitsEngineSpeed(rate: Float): Float =
-        (VITS_NORMAL_SPEED / rate.coerceAtLeast(0.1f)).coerceIn(0.05f, 1f)
+        TtsRatePolicy.vitsSpeed(rate)
 
     private fun stopCurrentAudio() {
         DiagnosticLogger.event(
@@ -633,8 +659,10 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun savePerformanceMetrics() {
-        val hitRate = if (generatedChunks == 0) 0f else prefetchHits.toFloat() / generatedChunks
+        val hitRate = if (prefetchRequests == 0) 0f else prefetchHits.toFloat() / prefetchRequests
         performanceStore.saveMetrics(
+            engineInitMillis = lastEngineInitMillis,
+            firstAudioMillis = lastFirstAudioMillis,
             generationMillis = lastGenerationMillis,
             realTimeFactor = lastRealTimeFactor,
             prefetchHitRate = hitRate,
@@ -645,6 +673,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private fun pause() {
         playing = false
         stopCurrentAudio()
+        releaseWakeLock()
         abandonAudioFocus()
         broadcastState()
         updateNotification("已暂停")
@@ -658,6 +687,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         stopCurrentAudio()
         if (!moveIndex(delta)) return
         playing = true
+        acquireWakeLock()
         speakCurrent()
     }
 
@@ -678,6 +708,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         DiagnosticLogger.event("TTS_PLAY", "stop")
         playing = false
         stopCurrentAudio()
+        releaseWakeLock()
         abandonAudioFocus()
         broadcastState()
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -696,6 +727,18 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         audioManager.abandonAudioFocusRequest(audioFocusRequest)
         hasAudioFocus = false
         DiagnosticLogger.event("TTS_FOCUS", "abandoned")
+    }
+
+    private fun acquireWakeLock() {
+        val lock = wakeLock ?: powerManager.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "$packageName:tts-playback",
+        ).apply { setReferenceCounted(false) }.also { wakeLock = it }
+        lock.acquire(WAKE_LOCK_TIMEOUT_MS)
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.takeIf { it.isHeld }?.release()
     }
 
     private fun utteranceId(ref: SentenceRef) =
@@ -789,6 +832,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     override fun onDestroy() {
         DiagnosticLogger.event("TTS_SERVICE", "destroy")
         stopCurrentAudio()
+        releaseWakeLock()
         tts?.shutdown()
         powerManager.removeThermalStatusListener(thermalListener)
         scope.cancel()
@@ -840,9 +884,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         private const val PLAYBACK_COMPLETION_GRACE_MS = 500L
         private const val PLAYBACK_POLL_INTERVAL_MS = 20L
         private const val STREAM_WRITE_FRAMES = 4096
-        // This model's native speed=1 output is much slower than normal narration. Diagnostics
-        // show that speed=0.357 still produces only about 2.5 Chinese characters per second.
-        private const val VITS_NORMAL_SPEED = 0.2f
+        private const val WAKE_LOCK_TIMEOUT_MS = 10 * 60 * 1000L
         private val NATIVE_CLEANUP_SCOPE = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     }
 }

@@ -51,6 +51,7 @@ android {
 
     buildTypes {
         debug {
+            applicationIdSuffix = ".debug"
             if (hasFixedDebugSigning) {
                 signingConfig = signingConfigs.getByName("fixedDebug")
             }
@@ -102,4 +103,6 @@ dependencies {
     implementation("com.github.k2-fsa:sherpa-onnx:v1.13.3")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
 }

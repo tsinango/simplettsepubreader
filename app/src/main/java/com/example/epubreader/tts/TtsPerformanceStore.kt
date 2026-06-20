@@ -14,25 +14,18 @@ class TtsPerformanceStore(context: Context) {
     }
 
     fun snapshot(): TtsPerformanceSnapshot = TtsPerformanceSnapshot(
-        requestedBackend = requestedBackend(),
-        activeBackend = TtsBackend.CPU,
         cpuThreads = cpuThreads(),
+        engineInitMillis = preferences.getLong(KEY_ENGINE_INIT_MS, 0),
+        firstAudioMillis = preferences.getLong(KEY_FIRST_AUDIO_MS, 0),
         generationMillis = preferences.getLong(KEY_GENERATION_MS, 0),
         realTimeFactor = preferences.getFloat(KEY_RTF, 0f),
         prefetchHitRate = preferences.getFloat(KEY_PREFETCH_HIT_RATE, 0f),
         gapMillis = preferences.getLong(KEY_GAP_MS, 0),
-        fallbackReason = qnnFallbackReason(),
     )
 
-    fun requestedBackend(): TtsBackend = runCatching {
-        TtsBackend.valueOf(preferences.getString(KEY_BACKEND, TtsBackend.AUTO.name).orEmpty())
-    }.getOrDefault(TtsBackend.AUTO)
-
-    fun setRequestedBackend(backend: TtsBackend) {
-        preferences.edit().putString(KEY_BACKEND, backend.name).apply()
-    }
-
     fun saveMetrics(
+        engineInitMillis: Long,
+        firstAudioMillis: Long,
         generationMillis: Long,
         realTimeFactor: Float,
         prefetchHitRate: Float,
@@ -41,17 +34,13 @@ class TtsPerformanceStore(context: Context) {
         preferences.edit()
             .putString(KEY_PROFILE, profileKey)
             .putInt(KEY_CPU_THREADS, cpuThreads())
+            .putLong(KEY_ENGINE_INIT_MS, engineInitMillis)
+            .putLong(KEY_FIRST_AUDIO_MS, firstAudioMillis)
             .putLong(KEY_GENERATION_MS, generationMillis)
             .putFloat(KEY_RTF, realTimeFactor)
             .putFloat(KEY_PREFETCH_HIT_RATE, prefetchHitRate)
             .putLong(KEY_GAP_MS, gapMillis)
             .apply()
-    }
-
-    private fun qnnFallbackReason(): String? = when (requestedBackend()) {
-        TtsBackend.CPU -> null
-        TtsBackend.AUTO, TtsBackend.QNN_HTP ->
-            "当前安装包未包含 QNN HTP runtime，已使用 CPU 整图回退"
     }
 
     private fun defaultCpuThreads(): Int =
@@ -61,13 +50,14 @@ class TtsPerformanceStore(context: Context) {
         private const val PREFERENCES_NAME = "tts_performance"
         private const val MODEL_REVISION = "75a59ed26f999226f412eb9e1dff31c86b42f082"
         private const val KEY_PROFILE = "profile"
-        private const val KEY_BACKEND = "backend"
         private const val KEY_CPU_THREADS = "cpu_threads"
+        private const val KEY_ENGINE_INIT_MS = "engine_init_ms"
+        private const val KEY_FIRST_AUDIO_MS = "first_audio_ms"
         private const val KEY_GENERATION_MS = "generation_ms"
         private const val KEY_RTF = "rtf"
         private const val KEY_PREFETCH_HIT_RATE = "prefetch_hit_rate"
         private const val KEY_GAP_MS = "gap_ms"
-        private const val MIN_CPU_THREADS = 2
+        private const val MIN_CPU_THREADS = 4
         private const val MAX_CPU_THREADS = 4
     }
 }

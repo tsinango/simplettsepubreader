@@ -125,7 +125,10 @@ class VitsModelDownloadWorker(
                 download(spec, File(dir, spec.name), completed)
                 completed += spec.size
             }
-            VitsModelManager.readyFile(applicationContext).writeText(REVISION)
+            val ready = VitsModelManager.readyFile(applicationContext)
+            val pendingReady = File(ready.parentFile, "${ready.name}.part")
+            pendingReady.writeText(REVISION)
+            check(pendingReady.renameTo(ready)) { "无法保存模型就绪标记" }
             setProgress(workDataOf(VitsModelManager.KEY_PROGRESS to 100))
             Result.success()
         } catch (e: Exception) {
@@ -138,6 +141,15 @@ class VitsModelDownloadWorker(
         val partial = File(target.parentFile, "${target.name}.part")
         var downloaded = partial.takeIf { it.isFile }?.length()?.coerceAtMost(spec.size) ?: 0L
         if (partial.length() > spec.size) {
+            partial.delete()
+            downloaded = 0L
+        }
+        if (downloaded == spec.size) {
+            if (sha256(partial) == spec.sha256) {
+                if (target.exists()) target.delete()
+                check(partial.renameTo(target)) { "无法保存 ${spec.name}" }
+                return
+            }
             partial.delete()
             downloaded = 0L
         }
@@ -155,6 +167,12 @@ class VitsModelDownloadWorker(
             if (downloaded > 0 && responseCode == HttpURLConnection.HTTP_OK) {
                 partial.delete()
                 downloaded = 0L
+            }
+            if (downloaded > 0 && responseCode == HttpURLConnection.HTTP_PARTIAL) {
+                val expectedRange = "bytes $downloaded-"
+                check(connection.getHeaderField("Content-Range")?.startsWith(expectedRange) == true) {
+                    "${spec.name} 断点响应范围不正确"
+                }
             }
             connection.inputStream.use { input ->
                 FileOutputStream(partial, downloaded > 0).buffered().use { sink ->
@@ -175,8 +193,14 @@ class VitsModelDownloadWorker(
         } finally {
             connection.disconnect()
         }
-        check(partial.length() == spec.size) { "${spec.name} 文件大小不正确" }
-        check(sha256(partial) == spec.sha256) { "${spec.name} 校验失败" }
+        if (partial.length() != spec.size) {
+            partial.delete()
+            error("${spec.name} 文件大小不正确")
+        }
+        if (sha256(partial) != spec.sha256) {
+            partial.delete()
+            error("${spec.name} 校验失败")
+        }
         if (target.exists()) target.delete()
         check(partial.renameTo(target)) { "无法保存 ${spec.name}" }
     }

@@ -9,9 +9,9 @@ data class SynthesisChunk(
 }
 
 object SynthesisChunker {
-    const val TARGET_CHARS = 120
-    const val MAX_CHARS = 160
-    private const val MIN_BREAK_CHARS = 60
+    const val TARGET_CHARS = 60
+    const val MAX_CHARS = 80
+    private const val MIN_BREAK_CHARS = 30
     private val preferredBreaks = charArrayOf('。', '！', '？', '；', '，', '.', '!', '?', ';', ',')
 
     fun split(logicalSentenceKey: String, text: String): List<SynthesisChunk> {
@@ -42,15 +42,23 @@ object SynthesisChunker {
     }
 }
 
-enum class TtsBackend { AUTO, QNN_HTP, CPU }
+object TtsRatePolicy {
+    // The model's speed argument is a multiplier: larger values are faster. A fixed
+    // calibration of 0.85 maps this voice's native pace to normal Chinese narration.
+    const val CALIBRATED_NORMAL_SPEED = 0.85f
+
+    fun userRate(value: Float): Float = value.coerceIn(0.5f, 2f)
+
+    fun vitsSpeed(value: Float): Float =
+        (CALIBRATED_NORMAL_SPEED * userRate(value)).coerceIn(0.25f, 1.5f)
+}
 
 data class TtsPerformanceSnapshot(
-    val requestedBackend: TtsBackend = TtsBackend.AUTO,
-    val activeBackend: TtsBackend = TtsBackend.CPU,
     val cpuThreads: Int = 2,
+    val engineInitMillis: Long = 0,
+    val firstAudioMillis: Long = 0,
     val generationMillis: Long = 0,
     val realTimeFactor: Float = 0f,
     val prefetchHitRate: Float = 0f,
     val gapMillis: Long = 0,
-    val fallbackReason: String? = null,
 )

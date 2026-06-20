@@ -38,6 +38,9 @@ jobs:
           mkdir -p signing
           echo "${{ secrets.TTS_READER_KEYSTORE_BASE64 }}" | base64 --decode > signing/tts-reader.jks
 
+      - name: Run unit tests and lint
+        run: ./gradlew testDebugUnitTest lintDebug
+
       - name: Build Debug APK
         env:
           TTS_READER_KEYSTORE: signing/tts-reader.jks

@@ -6,7 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.net.Uri
-import android.os.Build
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.epubreader.data.BookEntity
@@ -16,7 +16,6 @@ import com.example.epubreader.data.ReaderSettingsEntity
 import com.example.epubreader.data.ReadingLocatorEntity
 import com.example.epubreader.data.SentenceRef
 import com.example.epubreader.tts.ReaderTtsService
-import com.example.epubreader.tts.TtsBackend
 import com.example.epubreader.tts.TtsPerformanceSnapshot
 import com.example.epubreader.tts.TtsPerformanceStore
 import com.example.epubreader.tts.VitsModelManager
@@ -95,11 +94,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         val filter = IntentFilter(ReaderTtsService.ACTION_STATE_CHANGED)
-        if (Build.VERSION.SDK_INT >= 33) {
-            application.registerReceiver(ttsStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            application.registerReceiver(ttsStateReceiver, filter)
-        }
+        ContextCompat.registerReceiver(
+            application,
+            ttsStateReceiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
 
         viewModelScope.launch {
             books.collect { refreshLibraryProgress(it) }
@@ -300,12 +300,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         vitsModelManager.clearSwitchAfterDownload()
         if (settings.value?.ttsEngine == TTS_ENGINE_VITS) useSystemTts()
         vitsModelManager.delete()
-    }
-
-    fun selectTtsBackend(backend: TtsBackend) {
-        ttsPerformanceStore.setRequestedBackend(backend)
-        _ttsPerformance.value = ttsPerformanceStore.snapshot()
-        if (_readerPosition.value.isSpeaking) sendAction(ReaderTtsService.ACTION_SETTINGS_CHANGED)
     }
 
     fun refreshTtsPerformance() {

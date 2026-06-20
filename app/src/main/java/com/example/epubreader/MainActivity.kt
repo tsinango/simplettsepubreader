@@ -95,7 +95,6 @@ import com.example.epubreader.data.SentenceRef
 import com.example.epubreader.tts.VitsModelManager
 import com.example.epubreader.tts.VitsModelState
 import com.example.epubreader.tts.VitsModelStatus
-import com.example.epubreader.tts.TtsBackend
 import com.example.epubreader.tts.TtsPerformanceSnapshot
 import java.io.File
 import java.util.Locale
@@ -477,7 +476,6 @@ private fun ReaderScreen(
             onUseVitsTts = vm::useVitsTts,
             onCancelDownload = vm::cancelVitsDownload,
             onDeleteModel = vm::deleteVitsModel,
-            onSelectBackend = vm::selectTtsBackend,
             onExportDiagnostics = {
                 diagnosticExportMessage = null
                 diagnosticExporter.launch(DiagnosticLogger.defaultExportFileName())
@@ -720,7 +718,6 @@ private fun SettingsDialog(
     onUseVitsTts: () -> Unit,
     onCancelDownload: () -> Unit,
     onDeleteModel: () -> Unit,
-    onSelectBackend: (TtsBackend) -> Unit,
     onExportDiagnostics: () -> Unit,
     diagnosticExportMessage: String?,
     onClose: () -> Unit,
@@ -774,27 +771,13 @@ private fun SettingsDialog(
                     VitsModelStatus.NOT_DOWNLOADED -> Text("模型未下载")
                 }
                 if (modelState.status == VitsModelStatus.READY) {
-                    Text("推理后端")
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        listOf(
-                            TtsBackend.AUTO to "自动",
-                            TtsBackend.QNN_HTP to "QNN",
-                            TtsBackend.CPU to "CPU",
-                        ).forEach { (backend, label) ->
-                            TextButton(onClick = { onSelectBackend(backend) }) {
-                                Text(if (performance.requestedBackend == backend) "✓ $label" else label)
-                            }
-                        }
-                    }
                     Text(
-                        "当前：${performance.activeBackend.name} / ${performance.cpuThreads} 线程" +
+                        "当前：CPU / ${performance.cpuThreads} 线程" +
                             if (performance.realTimeFactor > 0f) {
-                                "，RTF ${"%.2f".format(performance.realTimeFactor)}，预取 ${"%.0f".format(performance.prefetchHitRate * 100)}%"
+                                "，RTF ${"%.2f".format(performance.realTimeFactor)}，预取 ${"%.0f".format(performance.prefetchHitRate * 100)}%" +
+                                    "，首音频 ${performance.firstAudioMillis} ms"
                             } else "",
                     )
-                    performance.fallbackReason?.let {
-                        Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
                 }
                 Text("主题")
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
