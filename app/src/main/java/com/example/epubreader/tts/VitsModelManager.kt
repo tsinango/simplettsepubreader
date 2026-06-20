@@ -83,29 +83,41 @@ class VitsModelManager(private val context: Context) {
     }
 
     companion object {
-        const val MODEL_SIZE_BYTES = 123_534_359L
+        const val MODEL_SIZE_BYTES = 123_746_625L
         const val MODEL_SIZE_LABEL = "约 124 MB"
         internal const val WORK_NAME = "download-vits-fanchen-wnj"
         internal const val KEY_PROGRESS = "progress"
         internal const val KEY_ERROR = "error"
         private const val PREFERENCES_NAME = "vits_model"
         private const val KEY_SWITCH_AFTER_DOWNLOAD = "switch_after_download"
-        private const val READY_FILE = ".ready-75a59ed"
+        private const val READY_FILE = ".ready-75a59ed-v2"
 
         fun modelDir(context: Context) = File(context.filesDir, "models/vits-zh-hf-fanchen-wnj")
         fun isReady(context: Context): Boolean =
             File(modelDir(context), READY_FILE).isFile &&
                 modelFile(context).length() == MODEL_FILE_SIZE &&
                 tokensFile(context).length() == TOKENS_FILE_SIZE &&
-                lexiconFile(context).length() == LEXICON_FILE_SIZE
+                lexiconFile(context).length() == LEXICON_FILE_SIZE &&
+                phoneFstFile(context).length() == PHONE_FST_SIZE &&
+                dateFstFile(context).length() == DATE_FST_SIZE &&
+                numberFstFile(context).length() == NUMBER_FST_SIZE
         fun modelFile(context: Context) = File(modelDir(context), "vits-zh-hf-fanchen-wnj.onnx")
         fun tokensFile(context: Context) = File(modelDir(context), "tokens.txt")
         fun lexiconFile(context: Context) = File(modelDir(context), "lexicon.txt")
+        fun phoneFstFile(context: Context) = File(modelDir(context), "phone.fst")
+        fun dateFstFile(context: Context) = File(modelDir(context), "date.fst")
+        fun numberFstFile(context: Context) = File(modelDir(context), "number.fst")
         internal fun readyFile(context: Context) = File(modelDir(context), READY_FILE)
 
         private const val MODEL_FILE_SIZE = 121_076_185L
         private const val TOKENS_FILE_SIZE = 331L
         private const val LEXICON_FILE_SIZE = 2_457_843L
+        private const val PHONE_FST_SIZE = 88_630L
+        private const val DATE_FST_SIZE = 59_154L
+        private const val NUMBER_FST_SIZE = 64_482L
+        private const val PHONE_FST_SHA256 = "1ac2b6fa56b1442320c4de7db08353bab8963a2b57f365eebcdd3a2d3562f8d7"
+        private const val DATE_FST_SHA256 = "eb8aa079ae3cb81d8f4404992f39d61a0cb990947512b5b8d1e54d1f6980e718"
+        private const val NUMBER_FST_SHA256 = "743f402181fcfebf76cc2f0546b71fa26476e626fbe4e460fb7b4c3a7a8bd5bd"
     }
 }
 
@@ -230,6 +242,9 @@ class VitsModelDownloadWorker(
             ModelFile("vits-zh-hf-fanchen-wnj.onnx", 121_076_185, "ccd592a5f6fa3f7e8840405c3422ffed9eba58db253d4abd82c75280db98c644"),
             ModelFile("tokens.txt", 331, "34b035b9aeb070df6188b022f29c00e0e142c7ade9f25611ced65db5e9cc8402"),
             ModelFile("lexicon.txt", 2_457_843, "9af2824e49e731bf615927c768fdc36bbbe894cac57d8e0088d9c94331b07320"),
+            ModelFile("phone.fst", 88_630, "1ac2b6fa56b1442320c4de7db08353bab8963a2b57f365eebcdd3a2d3562f8d7"),
+            ModelFile("date.fst", 59_154, "eb8aa079ae3cb81d8f4404992f39d61a0cb990947512b5b8d1e54d1f6980e718"),
+            ModelFile("number.fst", 64_482, "743f402181fcfebf76cc2f0546b71fa26476e626fbe4e460fb7b4c3a7a8bd5bd"),
         )
     }
 }

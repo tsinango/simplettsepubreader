@@ -449,6 +449,13 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
 
     private fun embeddedTts(): OfflineTts = offlineTts ?: run {
         val startedAt = SystemClock.elapsedRealtime()
+        val numThreads = if (thermalStatus >= PowerManager.THERMAL_STATUS_SEVERE) 2
+            else performanceStore.cpuThreads()
+        val fstPaths = listOf(
+            VitsModelManager.phoneFstFile(this).absolutePath,
+            VitsModelManager.dateFstFile(this).absolutePath,
+            VitsModelManager.numberFstFile(this).absolutePath,
+        ).joinToString(",")
         OfflineTts(
         config = OfflineTtsConfig(
             model = OfflineTtsModelConfig(
@@ -457,19 +464,19 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                     tokens = VitsModelManager.tokensFile(this).absolutePath,
                     lexicon = VitsModelManager.lexiconFile(this).absolutePath,
                 ),
-                numThreads = if (thermalStatus >= PowerManager.THERMAL_STATUS_SEVERE) {
-                    2
-                } else {
-                    performanceStore.cpuThreads()
-                },
+                numThreads = numThreads,
             ),
+            ruleFsts = fstPaths,
+            maxNumSentences = 1,
+            silenceScale = 0.2f,
         ),
         ).also {
         lastEngineInitMillis = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(1)
         offlineTts = it
         DiagnosticLogger.event(
             "VITS_ENGINE",
-            "created initMs=$lastEngineInitMillis threads=${if (thermalStatus >= PowerManager.THERMAL_STATUS_SEVERE) 2 else performanceStore.cpuThreads()} " +
+            "created initMs=$lastEngineInitMillis threads=$numThreads " +
+                "ruleFsts=[phone,date,number] maxNumSentences=1 silenceScale=0.2 " +
                 "modelReady=${VitsModelManager.isReady(this)} " +
                 "modelBytes=${VitsModelManager.modelFile(this).length()} " +
                 "tokensBytes=${VitsModelManager.tokensFile(this).length()} " +
