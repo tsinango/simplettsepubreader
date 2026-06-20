@@ -16,6 +16,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -67,6 +69,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -96,7 +99,10 @@ import com.example.epubreader.tts.TtsBackend
 import com.example.epubreader.tts.TtsPerformanceSnapshot
 import java.io.File
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -282,6 +288,23 @@ private fun ReaderScreen(
     var showSleepTimer by remember { mutableStateOf(false) }
     val lifecycle = LocalLifecycleOwner.current
     val context = LocalContext.current
+    val uiScope = rememberCoroutineScope()
+    var diagnosticExportMessage by remember { mutableStateOf<String?>(null) }
+    val diagnosticExporter = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/plain"),
+    ) { uri ->
+        if (uri != null) {
+            uiScope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    DiagnosticLogger.export(context, uri)
+                }
+                diagnosticExportMessage = result.fold(
+                    onSuccess = { "诊断日志已保存" },
+                    onFailure = { "保存失败：${it.message ?: "未知错误"}" },
+                )
+            }
+        }
+    }
     val window = context.findActivity()?.window
     val chapters = state.parsed?.chapters.orEmpty()
     val currentChapterIndex = position.chapterIndex.coerceIn(chapters.indicesOrZero())
@@ -455,6 +478,11 @@ private fun ReaderScreen(
             onCancelDownload = vm::cancelVitsDownload,
             onDeleteModel = vm::deleteVitsModel,
             onSelectBackend = vm::selectTtsBackend,
+            onExportDiagnostics = {
+                diagnosticExportMessage = null
+                diagnosticExporter.launch(DiagnosticLogger.defaultExportFileName())
+            },
+            diagnosticExportMessage = diagnosticExportMessage,
             onClose = { showSettings = false },
         )
     }
@@ -693,6 +721,8 @@ private fun SettingsDialog(
     onCancelDownload: () -> Unit,
     onDeleteModel: () -> Unit,
     onSelectBackend: (TtsBackend) -> Unit,
+    onExportDiagnostics: () -> Unit,
+    diagnosticExportMessage: String?,
     onClose: () -> Unit,
 ) {
     var value by remember { mutableStateOf(current) }
@@ -704,7 +734,7 @@ private fun SettingsDialog(
         onDismissRequest = onClose,
         title = { Text("阅读设置") },
         text = {
-            Column {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text("字号 ${value.fontSize.toInt()}")
                 Slider(value.fontSize, { value = value.copy(fontSize = it) }, valueRange = 14f..34f)
                 Text("行距 ${"%.1f".format(value.lineHeight)}")
@@ -773,6 +803,18 @@ private fun SettingsDialog(
                             Text(if (value.theme == id) "✓ $label" else label)
                         }
                     }
+                }
+                Text("诊断")
+                TextButton(onClick = onExportDiagnostics) { Text("导出诊断日志") }
+                diagnosticExportMessage?.let { message ->
+                    Text(
+                        message,
+                        color = if (message.startsWith("保存失败")) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
                 }
             }
         },

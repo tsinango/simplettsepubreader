@@ -10,6 +10,7 @@ class ReaderApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        DiagnosticLogger.initialize(this)
         repository = ReaderRepository(this, ReaderDatabase.create(this).dao())
     }
 }

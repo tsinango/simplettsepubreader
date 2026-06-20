@@ -20,6 +20,7 @@ import android.speech.tts.UtteranceProgressListener
 import androidx.core.app.NotificationCompat
 import androidx.media.app.NotificationCompat.MediaStyle
 import com.example.epubreader.MainActivity
+import com.example.epubreader.DiagnosticLogger
 import com.example.epubreader.ReaderApplication
 import com.example.epubreader.data.ParsedBook
 import com.example.epubreader.data.ReaderRepository
@@ -85,6 +86,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private var hasAudioFocus = false
     private val thermalListener = PowerManager.OnThermalStatusChangedListener { status ->
         thermalStatus = status
+        DiagnosticLogger.event("TTS_THERMAL", "status=$status")
         if (status >= PowerManager.THERMAL_STATUS_SEVERE) {
             prefetched?.audio?.cancel()
             prefetched = null
@@ -99,6 +101,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                     .build(),
             )
             .setOnAudioFocusChangeListener {
+                DiagnosticLogger.event("TTS_FOCUS", "change=$it")
                 if (it < 0) pause()
             }
             .build()
@@ -112,6 +115,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         thermalStatus = powerManager.currentThermalStatus
         powerManager.addThermalStatusListener(mainExecutor, thermalListener)
         performanceStore = TtsPerformanceStore(this)
+        DiagnosticLogger.event("TTS_SERVICE", "created thermal=$thermalStatus")
         createChannel()
         tts = TextToSpeech(this, this)
         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
@@ -137,6 +141,11 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         intent?.getStringExtra(EXTRA_BOOK_ID)?.let { bookId = it }
+        DiagnosticLogger.event(
+            "TTS_COMMAND",
+            "action=${intent?.action ?: "null"} startId=$startId " +
+                "book=${DiagnosticLogger.bookToken(bookId)}",
+        )
         when (intent?.action) {
             ACTION_PLAY -> {
                 startForeground(NOTIFICATION_ID, notification("正在准备朗读"))
@@ -160,6 +169,10 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         initialized = languageStatus != TextToSpeech.LANG_MISSING_DATA &&
             languageStatus != TextToSpeech.LANG_NOT_SUPPORTED &&
             languageStatus != TextToSpeech.ERROR
+        DiagnosticLogger.event(
+            "SYSTEM_TTS",
+            "initialized=$initialized initStatus=$status languageStatus=$languageStatus",
+        )
         if (!initialized && playing && activeEngine == MainViewModel.TTS_ENGINE_SYSTEM) {
             playing = false
             broadcastState()
@@ -171,6 +184,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
 
     private suspend fun loadAndPlay() {
         val id = bookId ?: return
+        DiagnosticLogger.event("TTS_PLAY", "load book=${DiagnosticLogger.bookToken(id)}")
         val parsedBook = ensureBook(id) ?: return stopPlayback()
         stopCurrentAudio()
         val locator = repository.locator(id)
@@ -233,6 +247,10 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         val settings = repository.settings.first()
         activeEngine = settings?.ttsEngine ?: MainViewModel.TTS_ENGINE_SYSTEM
         speechRate = actualSpeechRate(settings?.speechRate ?: 1f)
+        DiagnosticLogger.event(
+            "TTS_SETTINGS",
+            "engine=$activeEngine rate=$speechRate pitch=${settings?.pitch ?: 1f}",
+        )
         tts?.setSpeechRate(speechRate)
         tts?.setPitch(settings?.pitch ?: 1f)
         settings?.voiceName?.let { name ->
@@ -261,6 +279,12 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         }
         broadcastState()
         updateNotification(sentence.text.take(80))
+        DiagnosticLogger.event(
+            "TTS_SENTENCE",
+            "engine=$activeEngine book=${DiagnosticLogger.bookToken(id)} chapter=$chapterIndex " +
+                "paragraph=${sentence.paragraphIndex} sentence=${sentence.sentenceIndex} " +
+                "length=${sentence.text.length}",
+        )
         if (activeEngine == MainViewModel.TTS_ENGINE_VITS) {
             speakEmbedded(sentence)
         } else {
@@ -281,12 +305,14 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         abandonAudioFocus()
         broadcastState()
         val message = "系统 TTS 朗读失败（错误码 $errorCode），请安装对应语言的语音包或切换到内置 VITS"
+        DiagnosticLogger.event("SYSTEM_TTS", "speak_failed code=$errorCode")
         broadcastError(message)
         updateNotification(message)
     }
 
     private suspend fun speakEmbedded(sentence: SentenceRef) {
         if (!VitsModelManager.isReady(this)) {
+            DiagnosticLogger.event("VITS", "model_not_ready")
             fallbackToSystem("内置语音模型不可用，已切换到系统 TTS")
             return
         }
@@ -319,6 +345,11 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            DiagnosticLogger.error(
+                "VITS",
+                "sentence_failed chunk=$synthesisChunkIndex serial=$serial",
+                e,
+            )
             if (serial == embeddedGenerationSerial && playing) {
                 fallbackToSystem("内置语音生成失败，已切换到系统 TTS")
             }
@@ -333,6 +364,10 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
             if (!isGenerationCurrent(serial)) return@withLock null
             val engine = withContext(Dispatchers.Default) { embeddedTts() }
             val startedAt = SystemClock.elapsedRealtime()
+            DiagnosticLogger.event(
+                "VITS_GENERATE",
+                "start serial=$serial chunk=${chunk.index} length=${chunk.text.length} rate=$speechRate",
+            )
             val audio = withContext(Dispatchers.Default) {
                 // Chunks are deliberately bounded, so direct generation remains cancellable at
                 // chunk boundaries without repeatedly crossing JNI from a native worker thread.
@@ -348,6 +383,11 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
             lastGenerationMillis = generationMillis
             lastRealTimeFactor = generationMillis.toFloat() / audioMillis.coerceAtLeast(1)
             generatedChunks++
+            DiagnosticLogger.event(
+                "VITS_GENERATE",
+                "done serial=$serial chunk=${chunk.index} generationMs=$generationMillis " +
+                    "sampleRate=${audio.sampleRate} samples=${audio.samples.size} audioMs=$audioMillis",
+            )
             SynthesizedAudio(
                 chunk = chunk,
                 samples = audio.samples,
@@ -391,11 +431,25 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                 },
             ),
         ),
-    ).also { offlineTts = it }
+    ).also {
+        offlineTts = it
+        DiagnosticLogger.event(
+            "VITS_ENGINE",
+            "created threads=${if (thermalStatus >= PowerManager.THERMAL_STATUS_SEVERE) 2 else performanceStore.cpuThreads()} " +
+                "modelReady=${VitsModelManager.isReady(this)} " +
+                "modelBytes=${VitsModelManager.modelFile(this).length()} " +
+                "tokensBytes=${VitsModelManager.tokensFile(this).length()} " +
+                "lexiconBytes=${VitsModelManager.lexiconFile(this).length()}",
+        )
+    }
 
     private suspend fun playEmbeddedAudio(audio: SynthesizedAudio, serial: Int) {
         releaseAudioTrack()
         val pcm = audio.samples.toPcm16()
+        DiagnosticLogger.event(
+            "AUDIO_TRACK",
+            "create serial=$serial sampleRate=${audio.sampleRate} frames=${pcm.size} encoding=PCM16",
+        )
         val track = AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
@@ -417,6 +471,10 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
             track.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING) != pcm.size
         ) {
             track.runCatching { release() }
+            DiagnosticLogger.event(
+                "AUDIO_TRACK",
+                "write_failed serial=$serial state=${track.state} frames=${pcm.size}",
+            )
             fallbackToSystem("音频输出失败，已切换到系统 TTS")
             return
         }
@@ -426,7 +484,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
             override fun onMarkerReached(value: AudioTrack?) {
                 scope.launch {
                     val completedTrack = value ?: return@launch
-                    onEmbeddedAudioDone(serial, completedTrack)
+                    onEmbeddedAudioDone(serial, completedTrack, "marker")
                 }
             }
             override fun onPeriodicNotification(value: AudioTrack?) = Unit
@@ -437,12 +495,13 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         }
         updateNotification(chapterSentences.getOrNull(sentenceIndex)?.text?.take(80).orEmpty())
         track.play()
+        DiagnosticLogger.event("AUDIO_TRACK", "playing serial=$serial frames=${pcm.size}")
         // Several Android audio HALs fail to deliver a marker callback for a static track. Keep
         // the marker as the fast path and use elapsed playback time as a bounded fallback.
         val expectedMillis = pcm.size * 1000L / audio.sampleRate.coerceAtLeast(1)
         playbackCompletionJob = scope.launch {
             delay(expectedMillis + PLAYBACK_COMPLETION_GRACE_MS)
-            onEmbeddedAudioDone(serial, track)
+            onEmbeddedAudioDone(serial, track, "timeout")
         }
     }
 
@@ -450,11 +509,19 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         (this[index].coerceIn(-1f, 1f) * Short.MAX_VALUE).toInt().toShort()
     }
 
-    private suspend fun onEmbeddedAudioDone(serial: Int, completedTrack: AudioTrack) {
+    private suspend fun onEmbeddedAudioDone(
+        serial: Int,
+        completedTrack: AudioTrack,
+        source: String,
+    ) {
         if (!isGenerationCurrent(serial) || audioTrack !== completedTrack) return
         // Detach synchronously before the next suspension so the marker callback and timeout
         // fallback cannot both advance the chunk/sentence position.
         releaseAudioTrack()
+        DiagnosticLogger.event(
+            "AUDIO_TRACK",
+            "completed serial=$serial source=$source chunk=$synthesisChunkIndex",
+        )
         lastChunkFinishedAt = SystemClock.elapsedRealtime()
         if (synthesisChunkIndex + 1 < synthesisChunks.size) {
             synthesisChunkIndex++
@@ -469,6 +536,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     }
 
     private suspend fun fallbackToSystem(message: String) {
+        DiagnosticLogger.event("TTS_FALLBACK", message)
         stopCurrentAudio()
         activeEngine = MainViewModel.TTS_ENGINE_SYSTEM
         val settings = repository.settings.first() ?: com.example.epubreader.data.ReaderSettingsEntity()
@@ -488,6 +556,10 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
             .coerceIn(0.3f, 4f)
 
     private fun stopCurrentAudio() {
+        DiagnosticLogger.event(
+            "TTS_AUDIO",
+            "stop_current engine=$activeEngine serial=$embeddedGenerationSerial track=${audioTrack != null}",
+        )
         embeddedGenerationSerial++
         prefetched?.audio?.cancel()
         prefetched = null
@@ -551,6 +623,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun stopPlayback() {
+        DiagnosticLogger.event("TTS_PLAY", "stop")
         playing = false
         stopCurrentAudio()
         abandonAudioFocus()
@@ -562,6 +635,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private fun ensureAudioFocus(): Boolean {
         if (hasAudioFocus) return true
         hasAudioFocus = audioManager.requestAudioFocus(audioFocusRequest) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        DiagnosticLogger.event("TTS_FOCUS", "request granted=$hasAudioFocus")
         return hasAudioFocus
     }
 
@@ -569,6 +643,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         if (!hasAudioFocus) return
         audioManager.abandonAudioFocusRequest(audioFocusRequest)
         hasAudioFocus = false
+        DiagnosticLogger.event("TTS_FOCUS", "abandoned")
     }
 
     private fun utteranceId(ref: SentenceRef) =
@@ -660,6 +735,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     }
 
     override fun onDestroy() {
+        DiagnosticLogger.event("TTS_SERVICE", "destroy")
         stopCurrentAudio()
         tts?.shutdown()
         powerManager.removeThermalStatusListener(thermalListener)
@@ -670,6 +746,8 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         NATIVE_CLEANUP_SCOPE.launch {
             synthesisMutex.withLock {
                 offlineTts?.runCatching { release() }
+                    ?.onSuccess { DiagnosticLogger.event("VITS_ENGINE", "released") }
+                    ?.onFailure { DiagnosticLogger.error("VITS_ENGINE", "release_failed", it) }
                 offlineTts = null
             }
         }
