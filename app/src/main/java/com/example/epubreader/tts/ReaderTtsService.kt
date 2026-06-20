@@ -27,6 +27,7 @@ import com.example.epubreader.data.ReaderRepository
 import com.example.epubreader.data.ReadingLocatorEntity
 import com.example.epubreader.data.SentenceRef
 import com.example.epubreader.MainViewModel
+import com.k2fsa.sherpa.onnx.GenerationConfig
 import com.k2fsa.sherpa.onnx.OfflineTts
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
@@ -394,12 +395,16 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                 "start serial=$serial chunk=${chunk.index} length=${chunk.text.length} " +
                     "rate=$speechRate engineSpeed=$engineSpeed",
             )
+            val genConfig = GenerationConfig(
+                silenceScale = 0.2f,
+                speed = engineSpeed,
+                sid = 0,
+            )
             val generated = withContext(Dispatchers.Default) {
-                engine.generate(
-                    text = chunk.text,
-                    sid = 0,
-                    speed = engineSpeed,
-                )
+                engine.generateWithConfigAndCallback(
+                    chunk.text,
+                    genConfig,
+                ) { if (isGenerationCurrent(serial)) 1 else 0 }
             }
             if (!isGenerationCurrent(serial) || generated.samples.isEmpty()) return@withLock null
             val silenceSamples = chunk.pauseMs * generated.sampleRate / 1000
