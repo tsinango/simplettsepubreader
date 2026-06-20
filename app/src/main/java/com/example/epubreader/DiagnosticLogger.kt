@@ -45,7 +45,7 @@ object DiagnosticLogger {
             )
             event(
                 "APP",
-                "session_start version=${BuildConfig.VERSION_NAME}(${BuildConfig.VERSION_CODE}) " +
+                "session_start version=${appVersion(appContext)} " +
                     "sdk=${Build.VERSION.SDK_INT} device=${Build.MANUFACTURER}/${Build.MODEL} " +
                     "abis=${Build.SUPPORTED_ABIS.joinToString()}",
             )
@@ -92,7 +92,7 @@ object DiagnosticLogger {
             OutputStreamWriter(output, StandardCharsets.UTF_8).use { writer ->
                 writer.appendLine("TTS Reader diagnostics")
                 writer.appendLine("exported=${DiagnosticLogFormatter.timestamp(System.currentTimeMillis())}")
-                writer.appendLine("version=${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+                writer.appendLine("version=${appVersion(context)}")
                 writer.appendLine("android=${Build.VERSION.SDK_INT}")
                 writer.appendLine("device=${Build.MANUFACTURER} ${Build.MODEL}")
                 writer.appendLine("abis=${Build.SUPPORTED_ABIS.joinToString()}")
@@ -105,6 +105,12 @@ object DiagnosticLogger {
 
     fun defaultExportFileName(nowMillis: Long = System.currentTimeMillis()): String =
         "tts-reader-diagnostics-${SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date(nowMillis))}.txt"
+
+    private fun appVersion(context: Context): String = runCatching {
+        context.packageManager.getPackageInfo(context.packageName, 0).let { info ->
+            "${info.versionName.orEmpty()}(${info.longVersionCode})"
+        }
+    }.getOrDefault("unknown")
 
     private fun installUncaughtExceptionHandler() {
         val previous = Thread.getDefaultUncaughtExceptionHandler()
