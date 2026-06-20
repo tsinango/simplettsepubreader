@@ -394,28 +394,34 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                 "start serial=$serial chunk=${chunk.index} length=${chunk.text.length} " +
                     "rate=$speechRate engineSpeed=$engineSpeed",
             )
-            val audio = withContext(Dispatchers.Default) {
+            val generated = withContext(Dispatchers.Default) {
                 engine.generate(
                     text = chunk.text,
                     sid = 0,
                     speed = engineSpeed,
                 )
             }
-            if (!isGenerationCurrent(serial) || audio.samples.isEmpty()) return@withLock null
+            if (!isGenerationCurrent(serial) || generated.samples.isEmpty()) return@withLock null
+            val silenceSamples = chunk.pauseMs * generated.sampleRate / 1000
+            val extendedSamples = if (silenceSamples > 0) {
+                generated.samples.copyOf(generated.samples.size + silenceSamples)
+            } else {
+                generated.samples
+            }
             val generationMillis = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(1)
-            val audioMillis = audio.samples.size * 1000L / audio.sampleRate.coerceAtLeast(1)
+            val audioMillis = extendedSamples.size * 1000L / generated.sampleRate.coerceAtLeast(1)
             lastGenerationMillis = generationMillis
             lastRealTimeFactor = generationMillis.toFloat() / audioMillis.coerceAtLeast(1)
             generatedChunks++
             DiagnosticLogger.event(
                 "VITS_GENERATE",
                 "done serial=$serial chunk=${chunk.index} generationMs=$generationMillis " +
-                    "sampleRate=${audio.sampleRate} samples=${audio.samples.size} audioMs=$audioMillis",
+                    "sampleRate=${generated.sampleRate} samples=${generated.samples.size}+${silenceSamples} audioMs=$audioMillis",
             )
             SynthesizedAudio(
                 chunk = chunk,
-                samples = audio.samples,
-                sampleRate = audio.sampleRate,
+                samples = extendedSamples,
+                sampleRate = generated.sampleRate,
                 generationMillis = generationMillis,
             )
         }

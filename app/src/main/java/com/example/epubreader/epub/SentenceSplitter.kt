@@ -10,7 +10,7 @@ object SentenceSplitter {
     fun split(text: String): List<String> {
         val normalized = text.replace(whitespace, " ").trim()
         if (normalized.isEmpty()) return emptyList()
-        val iterator = BreakIterator.getSentenceInstance(Locale.getDefault())
+        val iterator = BreakIterator.getSentenceInstance(Locale.CHINESE)
         iterator.setText(normalized)
         val result = mutableListOf<String>()
         var start = iterator.first()
