@@ -67,6 +67,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     @Volatile private var activeEngine = MainViewModel.TTS_ENGINE_SYSTEM
     private var offlineTts: OfflineTts? = null
     private var audioTrack: AudioTrack? = null
+    private var audioWriteJob: Job? = null
     private var playbackCompletionJob: Job? = null
     @Volatile private var embeddedGenerationSerial = 0
     private var synthesisChunks: List<SynthesisChunk> = emptyList()
@@ -446,9 +447,24 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private suspend fun playEmbeddedAudio(audio: SynthesizedAudio, serial: Int) {
         releaseAudioTrack()
         val pcm = audio.samples.toPcm16()
+        val minBufferBytes = AudioTrack.getMinBufferSize(
+            audio.sampleRate,
+            AudioFormat.CHANNEL_OUT_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+        )
+        if (minBufferBytes <= 0) {
+            DiagnosticLogger.event(
+                "AUDIO_TRACK",
+                "min_buffer_failed serial=$serial sampleRate=${audio.sampleRate} result=$minBufferBytes",
+            )
+            fallbackToSystem("音频输出失败，已切换到系统 TTS")
+            return
+        }
+        val bufferBytes = minBufferBytes.coerceAtLeast(STREAM_WRITE_FRAMES * Short.SIZE_BYTES)
         DiagnosticLogger.event(
             "AUDIO_TRACK",
-            "create serial=$serial sampleRate=${audio.sampleRate} frames=${pcm.size} encoding=PCM16",
+            "create serial=$serial sampleRate=${audio.sampleRate} frames=${pcm.size} " +
+                "encoding=PCM16 mode=STREAM bufferBytes=$bufferBytes",
         )
         val track = AudioTrack.Builder()
             .setAudioAttributes(
@@ -464,44 +480,73 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                     .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                     .build(),
             )
-            .setTransferMode(AudioTrack.MODE_STATIC)
-            .setBufferSizeInBytes(pcm.size * Short.SIZE_BYTES)
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .setBufferSizeInBytes(bufferBytes)
             .build()
-        if (track.state != AudioTrack.STATE_INITIALIZED ||
-            track.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING) != pcm.size
-        ) {
+        if (track.state != AudioTrack.STATE_INITIALIZED) {
+            val state = track.state
             track.runCatching { release() }
             DiagnosticLogger.event(
                 "AUDIO_TRACK",
-                "write_failed serial=$serial state=${track.state} frames=${pcm.size}",
+                "init_failed serial=$serial state=$state frames=${pcm.size} bufferBytes=$bufferBytes",
             )
             fallbackToSystem("音频输出失败，已切换到系统 TTS")
             return
         }
         val gapStart = lastChunkFinishedAt
-        track.notificationMarkerPosition = pcm.size
-        track.setPlaybackPositionUpdateListener(object : AudioTrack.OnPlaybackPositionUpdateListener {
-            override fun onMarkerReached(value: AudioTrack?) {
-                scope.launch {
-                    val completedTrack = value ?: return@launch
-                    onEmbeddedAudioDone(serial, completedTrack, "marker")
-                }
-            }
-            override fun onPeriodicNotification(value: AudioTrack?) = Unit
-        })
         audioTrack = track
         if (gapStart > 0L) {
             lastGapMillis = (SystemClock.elapsedRealtime() - gapStart).coerceAtLeast(0)
         }
         updateNotification(chapterSentences.getOrNull(sentenceIndex)?.text?.take(80).orEmpty())
         track.play()
+        val playbackStartedAt = SystemClock.elapsedRealtime()
         DiagnosticLogger.event("AUDIO_TRACK", "playing serial=$serial frames=${pcm.size}")
-        // Several Android audio HALs fail to deliver a marker callback for a static track. Keep
-        // the marker as the fast path and use elapsed playback time as a bounded fallback.
         val expectedMillis = pcm.size * 1000L / audio.sampleRate.coerceAtLeast(1)
-        playbackCompletionJob = scope.launch {
-            delay(expectedMillis + PLAYBACK_COMPLETION_GRACE_MS)
-            onEmbeddedAudioDone(serial, track, "timeout")
+        audioWriteJob = scope.launch(Dispatchers.IO) {
+            var offset = 0
+            var writeError = 0
+            while (offset < pcm.size && isGenerationCurrent(serial) && audioTrack === track) {
+                val frames = minOf(STREAM_WRITE_FRAMES, pcm.size - offset)
+                val written = track.write(pcm, offset, frames, AudioTrack.WRITE_BLOCKING)
+                if (written <= 0) {
+                    writeError = written
+                    break
+                }
+                offset += written
+            }
+            withContext(Dispatchers.Main) {
+                if (!isGenerationCurrent(serial) || audioTrack !== track) return@withContext
+                audioWriteJob = null
+                if (writeError == 0 && offset != pcm.size) writeError = AudioTrack.ERROR
+                if (writeError < 0) {
+                    DiagnosticLogger.event(
+                        "AUDIO_TRACK",
+                        "write_failed serial=$serial result=$writeError framesWritten=$offset " +
+                            "frames=${pcm.size}",
+                    )
+                    fallbackToSystem("音频输出失败，已切换到系统 TTS")
+                    return@withContext
+                }
+                DiagnosticLogger.event("AUDIO_TRACK", "write_done serial=$serial frames=$offset")
+                val deadline = playbackStartedAt + expectedMillis + PLAYBACK_COMPLETION_GRACE_MS
+                playbackCompletionJob = scope.launch {
+                    while (isGenerationCurrent(serial) && audioTrack === track) {
+                        val playedFrames = track.playbackHeadPosition.toLong() and 0xffffffffL
+                        if (playedFrames >= pcm.size) {
+                            playbackCompletionJob = null
+                            onEmbeddedAudioDone(serial, track, "head")
+                            return@launch
+                        }
+                        if (SystemClock.elapsedRealtime() >= deadline) {
+                            playbackCompletionJob = null
+                            onEmbeddedAudioDone(serial, track, "timeout")
+                            return@launch
+                        }
+                        delay(PLAYBACK_POLL_INTERVAL_MS)
+                    }
+                }
+            }
         }
     }
 
@@ -515,8 +560,8 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         source: String,
     ) {
         if (!isGenerationCurrent(serial) || audioTrack !== completedTrack) return
-        // Detach synchronously before the next suspension so the marker callback and timeout
-        // fallback cannot both advance the chunk/sentence position.
+        // Detach synchronously before the next suspension so stale completion work cannot
+        // advance the chunk or sentence a second time.
         releaseAudioTrack()
         DiagnosticLogger.event(
             "AUDIO_TRACK",
@@ -572,6 +617,8 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun releaseAudioTrack() {
+        audioWriteJob?.cancel()
+        audioWriteJob = null
         playbackCompletionJob?.cancel()
         playbackCompletionJob = null
         audioTrack?.runCatching { pause() }
@@ -786,6 +833,8 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         private const val CHANNEL_ID = "reader_tts"
         private const val NOTIFICATION_ID = 42
         private const val PLAYBACK_COMPLETION_GRACE_MS = 500L
+        private const val PLAYBACK_POLL_INTERVAL_MS = 20L
+        private const val STREAM_WRITE_FRAMES = 4096
         private val NATIVE_CLEANUP_SCOPE = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     }
 }
