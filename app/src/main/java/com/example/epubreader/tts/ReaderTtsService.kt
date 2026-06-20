@@ -11,7 +11,6 @@ import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.AudioFormat
-import android.media.AudioTrack
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
@@ -34,13 +33,10 @@ import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -67,22 +63,13 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private var currentUtteranceId: String? = null
     @Volatile private var activeEngine = MainViewModel.TTS_ENGINE_SYSTEM
     private var offlineTts: OfflineTts? = null
-    private var audioTrack: AudioTrack? = null
-    private var audioPlaybackJob: Job? = null
-    private val audioQueue = ArrayDeque<QueuedAudio>(2)
-    private var totalFramesWritten = 0L
-    private var sentenceEndFrame = Long.MAX_VALUE
-    private var audioEncoding = AudioFormat.ENCODING_PCM_FLOAT
+    private lateinit var pipeline: EmbeddedPlaybackPipeline
+    private var generationJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
     @Volatile private var embeddedGenerationSerial = 0
-    private var synthesisChunks: List<SynthesisChunk> = emptyList()
-    private var synthesisChunkIndex = 0
-    private var prefetched: PrefetchedChunk? = null
     private val synthesisMutex = Mutex()
     private val commandMutex = Mutex()
     private var generatedChunks = 0
-    private var prefetchHits = 0
-    private var prefetchRequests = 0
     private var lastEngineInitMillis = 0L
     private var lastFirstAudioMillis = 0L
     private var playbackRequestedAt = 0L
@@ -96,6 +83,13 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private var lastSavedKey: String? = null
     private var lastBroadcastState: String? = null
     private var hasAudioFocus = false
+    private val audioPreferences by lazy {
+        getSharedPreferences("tts_audio", Context.MODE_PRIVATE)
+    }
+    private var floatPcmSupported: Boolean
+        get() = audioPreferences.getBoolean(KEY_FLOAT_PCM_SUPPORTED, true)
+        set(value) = audioPreferences.edit().putBoolean(KEY_FLOAT_PCM_SUPPORTED, value).apply()
+
     private val thermalListener = PowerManager.OnThermalStatusChangedListener { status ->
         thermalStatus = status
         val targetThreads = TtsThreadPolicy.threadsForThermal(status)
@@ -103,8 +97,9 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         if (TtsThreadPolicy.shouldRecreate(engineThreads, targetThreads)) {
             val reason = TtsThreadPolicy.reason(engineThreads, targetThreads)
             engineThreads = targetThreads
-            prefetched?.audio?.cancel()
-            prefetched = null
+            embeddedGenerationSerial++
+            generationJob?.cancel()
+            pipeline.stopPlayback()
             scope.launch(Dispatchers.Default) {
                 synthesisMutex.withLock {
                     val startedAt = SystemClock.elapsedRealtime()
@@ -112,6 +107,9 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                     offlineTts = null
                     val releaseMs = (SystemClock.elapsedRealtime() - startedAt)
                     DiagnosticLogger.event("VITS_ENGINE", "recreate $reason releaseMs=$releaseMs")
+                }
+                if (playing && activeEngine == MainViewModel.TTS_ENGINE_VITS) {
+                    withContext(Dispatchers.Main) { speakCurrent() }
                 }
             }
         }
@@ -139,6 +137,15 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         thermalStatus = powerManager.currentThermalStatus
         powerManager.addThermalStatusListener(mainExecutor, thermalListener)
         performanceStore = TtsPerformanceStore(this)
+        pipeline = EmbeddedPlaybackPipeline(
+            sinkFactory = DefaultAudioSinkFactory(),
+            scope = scope,
+            dispatcher = Dispatchers.IO,
+        )
+        pipeline.onSentenceComplete = { key -> handleSentenceComplete(key) }
+        pipeline.onAllPlaybackComplete = { handleAllPlaybackComplete() }
+        pipeline.onFallbackToPcm16 = { handleFallbackToPcm16() }
+        pipeline.onFallbackToSystem = { msg -> handleFallbackToSystem(msg) }
         DiagnosticLogger.event("TTS_SERVICE", "created thermal=$thermalStatus")
         createChannel()
         tts = TextToSpeech(this, this)
@@ -212,8 +219,6 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         playbackRequestedAt = SystemClock.elapsedRealtime()
         lastFirstAudioMillis = 0
         generatedChunks = 0
-        prefetchHits = 0
-        prefetchRequests = 0
         DiagnosticLogger.event("TTS_PLAY", "load book=${DiagnosticLogger.bookToken(id)}")
         val parsedBook = ensureBook(id) ?: return stopPlayback()
         stopCurrentAudio()
@@ -344,48 +349,51 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         updateNotification(message)
     }
 
-    private suspend fun speakEmbedded(sentence: SentenceRef) {
+    private fun speakEmbedded(sentence: SentenceRef) {
         if (!VitsModelManager.isReady(this)) {
             DiagnosticLogger.event("VITS", "model_not_ready")
-            fallbackToSystem("内置语音模型不可用，已切换到系统 TTS")
+            scope.launch { fallbackToSystem("内置语音模型不可用，已切换到系统 TTS") }
             return
         }
-        val sentenceKey = sentence.key()
-        if (synthesisChunks.firstOrNull()?.logicalSentenceKey != sentenceKey) {
-            synthesisChunks = SynthesisChunker.split(sentenceKey, sentence.text)
-            synthesisChunkIndex = 0
-        }
-        val chunk = synthesisChunks.getOrNull(synthesisChunkIndex) ?: return stopPlayback()
         val serial = embeddedGenerationSerial
-        val cached = prefetched?.takeIf { it.chunk.key == chunk.key && it.serial == serial }
-        val cacheReady = cached?.audio?.isCompleted == true
-        prefetched = null
-        updateNotification(if (cacheReady) sentence.text.take(80) else "正在生成语音…")
-        try {
-            var usedPrefetch = false
-            val prefetchedAudio = try {
-                cached?.audio?.await()?.also { usedPrefetch = true }
+        pipeline.setFloatSupported(floatPcmSupported)
+        pipeline.startPlayback(serial)
+        generationJob?.cancel()
+        generationJob = scope.launch(Dispatchers.Default) {
+            try {
+                var sentenceIdx = sentenceIndex
+                while (pipeline.isCurrentSerial(serial) && playing) {
+                    val current = chapterSentences.getOrNull(sentenceIdx) ?: break
+                    val chunks = SynthesisChunker.split(current.key(), current.text)
+                    if (chunks.isEmpty()) {
+                        sentenceIdx++
+                        continue
+                    }
+                    for ((chunkIndex, chunk) in chunks.withIndex()) {
+                        if (!pipeline.isCurrentSerial(serial)) return@launch
+                        val audio = synthesizeChunk(chunk, serial) ?: return@launch
+                        if (!pipeline.isCurrentSerial(serial) || audio.samples.isEmpty()) return@launch
+                        pipeline.enqueueAudio(
+                            samples = audio.samples,
+                            sampleRate = audio.sampleRate,
+                            s = serial,
+                            sentenceKey = current.key(),
+                            isSentenceEnd = chunkIndex == chunks.lastIndex,
+                        )
+                    }
+                    sentenceIdx++
+                }
+                pipeline.closeChannel()
             } catch (e: CancellationException) {
-                if (!isGenerationCurrent(serial)) throw e
-                null
-            }
-            val audio = prefetchedAudio ?: synthesizeChunk(chunk, serial)
-            if (usedPrefetch) prefetchHits++
-            if (!playing || activeEngine != MainViewModel.TTS_ENGINE_VITS ||
-                serial != embeddedGenerationSerial || audio == null || audio.samples.isEmpty()
-            ) return
-            playEmbeddedAudio(audio, serial)
-            prefetchNextChunk(serial)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            DiagnosticLogger.error(
-                "VITS",
-                "sentence_failed chunk=$synthesisChunkIndex serial=$serial",
-                e,
-            )
-            if (serial == embeddedGenerationSerial && playing) {
-                fallbackToSystem("内置语音生成失败，已切换到系统 TTS")
+                throw e
+            } catch (e: Exception) {
+                DiagnosticLogger.error("VITS", "pipeline_failed serial=$serial", e)
+                if (pipeline.isCurrentSerial(serial) && playing) {
+                    pipeline.closeChannel()
+                    withContext(Dispatchers.Main) {
+                        fallbackToSystem("内置语音生成失败，已切换到系统 TTS")
+                    }
+                }
             }
         }
     }
@@ -410,10 +418,11 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                 sid = 0,
             )
             val generated = withContext(Dispatchers.Default) {
+                val job = coroutineContext[Job]
                 engine.generateWithConfigAndCallback(
                     chunk.text,
                     genConfig,
-                ) { if (isGenerationCurrent(serial)) 1 else 0 }
+                ) { if (job?.isActive == true && isGenerationCurrent(serial)) 1 else 0 }
             }
             if (!isGenerationCurrent(serial) || generated.samples.isEmpty()) return@withLock null
             val silenceSamples = chunk.pauseMs * generated.sampleRate / 1000
@@ -433,7 +442,6 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                     "sampleRate=${generated.sampleRate} samples=${generated.samples.size}+${silenceSamples} audioMs=$audioMillis",
             )
             SynthesizedAudio(
-                chunk = chunk,
                 samples = extendedSamples,
                 sampleRate = generated.sampleRate,
                 generationMillis = generationMillis,
@@ -442,24 +450,6 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
 
     private fun isGenerationCurrent(serial: Int): Boolean =
         playing && activeEngine == MainViewModel.TTS_ENGINE_VITS && serial == embeddedGenerationSerial
-
-    private fun prefetchNextChunk(serial: Int) {
-        if (TtsThreadPolicy.threadsForThermal(thermalStatus) <= 2) return
-        val next = nextChunk() ?: return
-        prefetched?.audio?.cancel()
-        prefetched = PrefetchedChunk(
-            chunk = next,
-            serial = serial,
-            audio = scope.async(Dispatchers.Default) { synthesizeChunk(next, serial) },
-        )
-        prefetchRequests++
-    }
-
-    private fun nextChunk(): SynthesisChunk? {
-        synthesisChunks.getOrNull(synthesisChunkIndex + 1)?.let { return it }
-        val nextSentence = chapterSentences.getOrNull(sentenceIndex + 1) ?: return null
-        return SynthesisChunker.split(nextSentence.key(), nextSentence.text).firstOrNull()
-    }
 
     private fun embeddedTts(): OfflineTts = offlineTts ?: run {
         val startedAt = SystemClock.elapsedRealtime()
@@ -486,6 +476,9 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         ).also {
         lastEngineInitMillis = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(1)
         offlineTts = it
+        if (lastFirstAudioMillis == 0L && playbackRequestedAt > 0L) {
+            lastFirstAudioMillis = (SystemClock.elapsedRealtime() - playbackRequestedAt).coerceAtLeast(0)
+        }
         DiagnosticLogger.event(
             "VITS_ENGINE",
             "created initMs=$lastEngineInitMillis threads=$numThreads " +
@@ -498,143 +491,46 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     }
     }
 
-    private suspend fun playEmbeddedAudio(audio: SynthesizedAudio, serial: Int) {
-        val track = ensureAudioTrack(audio.sampleRate, serial) ?: return
-        val frames = audio.samples.size
-        audioQueue.addLast(QueuedAudio(audio.samples, audio.sampleRate, serial, frames, audio.chunk))
-        if (audioPlaybackJob == null) {
-            startAudioPlayback(serial, audio.sampleRate)
-        }
-        if (synthesisChunkIndex + 1 >= synthesisChunks.size) {
-            sentenceEndFrame = totalFramesWritten + frames
-        }
-    }
-
-    private fun ensureAudioTrack(sampleRate: Int, serial: Int): AudioTrack? {
-        val existing = audioTrack
-        if (existing != null && existing.state == AudioTrack.STATE_INITIALIZED) return existing
-        releaseAudioTrack()
-
-        val encoding = audioEncoding
-        val minBufferBytes = AudioTrack.getMinBufferSize(
-            sampleRate, AudioFormat.CHANNEL_OUT_MONO, encoding,
-        )
-        if (minBufferBytes <= 0 && encoding == AudioFormat.ENCODING_PCM_FLOAT) {
-            DiagnosticLogger.event("AUDIO_TRACK", "float_init_fallback serial=$serial")
-            audioEncoding = AudioFormat.ENCODING_PCM_16BIT
-            return ensureAudioTrack(sampleRate, serial)
-        }
-        if (minBufferBytes <= 0) {
-            DiagnosticLogger.event("AUDIO_TRACK", "min_buffer_failed serial=$serial sampleRate=$sampleRate result=$minBufferBytes")
-            return null
-        }
-        val bufferBytes = minBufferBytes.coerceAtLeast(STREAM_WRITE_FRAMES *
-            if (encoding == AudioFormat.ENCODING_PCM_FLOAT) 4 else 2)
-        val track = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build(),
-            )
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setEncoding(encoding)
-                    .setSampleRate(sampleRate)
-                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                    .build(),
-            )
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .setBufferSizeInBytes(bufferBytes)
-            .build()
-        if (track.state != AudioTrack.STATE_INITIALIZED) {
-            val state = track.state
-            track.runCatching { release() }
-            if (encoding == AudioFormat.ENCODING_PCM_FLOAT) {
-                DiagnosticLogger.event("AUDIO_TRACK", "float_init_failed serial=$serial state=$state fallback_to_pcm16")
-                audioEncoding = AudioFormat.ENCODING_PCM_16BIT
-                return ensureAudioTrack(sampleRate, serial)
-            }
-            DiagnosticLogger.event("AUDIO_TRACK", "init_failed serial=$serial state=$state")
-            return null
-        }
-        audioTrack = track
-        audioEncoding = encoding
-        totalFramesWritten = 0L
-        sentenceEndFrame = Long.MAX_VALUE
-        val label = if (encoding == AudioFormat.ENCODING_PCM_FLOAT) "PCM_FLOAT" else "PCM_16BIT"
-        DiagnosticLogger.event("AUDIO_TRACK", "created serial=$serial sampleRate=$sampleRate encoding=$label bufferBytes=$bufferBytes")
-        track.play()
-        if (lastFirstAudioMillis == 0L && playbackRequestedAt > 0L) {
-            lastFirstAudioMillis = (SystemClock.elapsedRealtime() - playbackRequestedAt).coerceAtLeast(0)
-        }
-        return track
-    }
-
-    private fun startAudioPlayback(serial: Int, sampleRate: Int) {
-        audioPlaybackJob = scope.launch(Dispatchers.IO) {
-            val track = audioTrack ?: return@launch
-            val isFloat = audioEncoding == AudioFormat.ENCODING_PCM_FLOAT
-            val pcm16Buffer = if (isFloat) null else ShortArray(STREAM_WRITE_FRAMES)
-            try {
-                while (isGenerationCurrent(serial) && audioTrack === track) {
-                    val entry = audioQueue.removeFirstOrNull() ?: break
-                    if (entry.serial != serial || !isGenerationCurrent(serial)) continue
-                    val samples = entry.samples
-                    val writeResult = if (isFloat) {
-                        track.write(samples, 0, samples.size, AudioTrack.WRITE_BLOCKING)
-                    } else {
-                        val buf = pcm16Buffer!!
-                        var offset = 0
-                        var error = 0
-                        while (offset < samples.size && isGenerationCurrent(serial) && audioTrack === track) {
-                            val chunkSize = minOf(STREAM_WRITE_FRAMES, samples.size - offset)
-                            for (i in 0 until chunkSize) {
-                                buf[i] = (samples[offset + i].coerceIn(-1f, 1f) * Short.MAX_VALUE).toInt().toShort()
-                            }
-                            val written = track.write(buf, 0, chunkSize, AudioTrack.WRITE_BLOCKING)
-                            if (written <= 0) { error = written; break }
-                            offset += written
-                        }
-                        if (error < 0) error else offset
+    private suspend fun handleSentenceComplete(key: String) {
+        withContext(Dispatchers.Main) {
+            val idx = chapterSentences.indexOfFirst { it.key() == key }
+            if (idx >= 0) {
+                sentenceIndex = idx + 1
+                val next = chapterSentences.getOrNull(sentenceIndex)
+                if (next != null) {
+                    val id = bookId
+                    if (id != null && lastSavedKey != next.key()) {
+                        repository.saveProgress(id, next, "TTS")
+                        lastSavedKey = next.key()
                     }
-                    if (writeResult <= 0) {
-                        DiagnosticLogger.event("AUDIO_TRACK", "write_failed serial=$serial result=$writeResult")
-                        break
-                    }
-                    totalFramesWritten += samples.size
-                    if (totalFramesWritten >= sentenceEndFrame) {
-                        withContext(Dispatchers.Main) { onSentenceAudioComplete(serial) }
-                    }
-                }
-            } finally {
-                withContext(Dispatchers.Main) {
-                    if (audioPlaybackJob?.isActive == true) audioPlaybackJob = null
+                    broadcastState()
+                    updateNotification(next.text.take(80))
                 }
             }
         }
     }
 
-    private suspend fun onSentenceAudioComplete(serial: Int) {
-        if (!isGenerationCurrent(serial)) return
-        sentenceEndFrame = Long.MAX_VALUE
-        val track = audioTrack
-        if (track != null) {
-            val playedFrames = track.playbackHeadPosition.toLong() and 0xffffffffL
-            while (playedFrames < totalFramesWritten && isGenerationCurrent(serial)) {
-                delay(PLAYBACK_POLL_INTERVAL_MS)
+    private suspend fun handleAllPlaybackComplete() {
+        withContext(Dispatchers.Main) {
+            if (moveIndex(1)) speakCurrent() else stopPlayback()
+        }
+    }
+
+    private suspend fun handleFallbackToPcm16() {
+        withContext(Dispatchers.Main) {
+            floatPcmSupported = false
+            DiagnosticLogger.event("AUDIO_TRACK", "fallback_to_pcm16_restart")
+            if (playing && activeEngine == MainViewModel.TTS_ENGINE_VITS) {
+                stopCurrentAudio()
+                speakCurrent()
             }
         }
-        lastChunkFinishedAt = SystemClock.elapsedRealtime()
-        if (synthesisChunkIndex + 1 < synthesisChunks.size) {
-            synthesisChunkIndex++
-            chapterSentences.getOrNull(sentenceIndex)?.let { speakEmbedded(it) }
-        } else if (moveIndex(1)) {
-            synthesisChunks = emptyList()
-            synthesisChunkIndex = 0
-            speakCurrent()
-        } else {
-            stopPlayback()
+    }
+
+    private suspend fun handleFallbackToSystem(message: String) {
+        withContext(Dispatchers.Main) {
+            stopCurrentAudio()
+            fallbackToSystem(message)
         }
     }
 
@@ -661,39 +557,24 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private fun stopCurrentAudio() {
         DiagnosticLogger.event(
             "TTS_AUDIO",
-            "stop_current engine=$activeEngine serial=$embeddedGenerationSerial track=${audioTrack != null}",
+            "stop_current engine=$activeEngine serial=$embeddedGenerationSerial pipeline=${pipeline.isPlaying}",
         )
         embeddedGenerationSerial++
-        prefetched?.audio?.cancel()
-        prefetched = null
-        synthesisChunks = emptyList()
-        synthesisChunkIndex = 0
+        generationJob?.cancel()
+        generationJob = null
+        pipeline.stopPlayback()
         currentUtteranceId = null
         tts?.stop()
-        releaseAudioTrack()
         savePerformanceMetrics()
     }
 
-    private fun releaseAudioTrack() {
-        audioPlaybackJob?.cancel()
-        audioPlaybackJob = null
-        audioQueue.clear()
-        totalFramesWritten = 0L
-        sentenceEndFrame = Long.MAX_VALUE
-        audioTrack?.runCatching { pause() }
-        audioTrack?.runCatching { flush() }
-        audioTrack?.runCatching { release() }
-        audioTrack = null
-    }
-
     private fun savePerformanceMetrics() {
-        val hitRate = if (prefetchRequests == 0) 0f else prefetchHits.toFloat() / prefetchRequests
         performanceStore.saveMetrics(
             engineInitMillis = lastEngineInitMillis,
             firstAudioMillis = lastFirstAudioMillis,
             generationMillis = lastGenerationMillis,
             realTimeFactor = lastRealTimeFactor,
-            prefetchHitRate = hitRate,
+            prefetchHitRate = 0f,
             gapMillis = lastGapMillis,
         )
     }
@@ -881,24 +762,9 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private data class SynthesizedAudio(
-        val chunk: SynthesisChunk,
         val samples: FloatArray,
         val sampleRate: Int,
         val generationMillis: Long,
-    )
-
-    private data class PrefetchedChunk(
-        val chunk: SynthesisChunk,
-        val serial: Int,
-        val audio: Deferred<SynthesizedAudio?>,
-    )
-
-    private data class QueuedAudio(
-        val samples: FloatArray,
-        val sampleRate: Int,
-        val serial: Int,
-        val frames: Int,
-        val chunk: SynthesisChunk,
     )
 
     companion object {
@@ -917,10 +783,10 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         const val EXTRA_ERROR = "error"
         private const val CHANNEL_ID = "reader_tts"
         private const val NOTIFICATION_ID = 42
-        private const val PLAYBACK_COMPLETION_GRACE_MS = 500L
         private const val PLAYBACK_POLL_INTERVAL_MS = 20L
         private const val STREAM_WRITE_FRAMES = 4096
         private const val WAKE_LOCK_TIMEOUT_MS = 10 * 60 * 1000L
+        private const val KEY_FLOAT_PCM_SUPPORTED = "float_pcm_supported"
         private val NATIVE_CLEANUP_SCOPE = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     }
 }
