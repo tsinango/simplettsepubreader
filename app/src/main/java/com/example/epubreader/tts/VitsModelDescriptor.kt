@@ -32,6 +32,7 @@ data class ModelFileStatus(
 enum class VitsModelId(val stableValue: String, val displayName: String) {
     FANCHEN_WNJ("FANCHEN_WNJ", "内置 VITS（WNJ）"),
     MELO_TTS_ZH_EN("MELO_TTS_ZH_EN", "MeloTTS 中英双语"),
+    KOKORO_MULTI_ZH("KOKORO_MULTI_ZH", "Kokoro-82M 中文"),
     ;
 
     companion object {
@@ -49,23 +50,32 @@ enum class VitsModelId(val stableValue: String, val displayName: String) {
  * files isolated.
  */
 data class VitsModelDescriptor(
-    val id: VitsModelId,
-    val sizeLabel: String,
-    val totalSizeBytes: Long,
-    val dirName: String,
-    val revision: String,
-    val huggingFaceRepo: String,
-    val readyMarkerName: String,
-    val workName: String,
+    override val id: VitsModelId,
+    override val sizeLabel: String,
+    override val totalSizeBytes: Long,
+    override val dirName: String,
+    override val revision: String,
+    override val huggingFaceRepo: String,
+    override val readyMarkerName: String,
+    override val workName: String,
     val onnxFileName: String,
     val tokensFileName: String,
     val lexiconFileName: String,
     val ruleFstFileNames: List<String>,
-    val specs: List<ModelFileSpec>,
-    val description: String,
-) {
+    override val specs: List<ModelFileSpec>,
+    override val description: String,
+    override val engineKind: TtsEngineKind = TtsEngineKind.SHERPA_VITS,
+    override val license: String = "Apache-2.0",
+    override val sampleRate: Int = 0,
+    override val speakerMetadata: List<SpeakerEntry>? = null,
+) : TtsModelPackDescriptor {
+    override val displayName: String
+        get() = id.displayName
+
     val baseUrl: String
         get() = "https://huggingface.co/$huggingFaceRepo/resolve/$revision"
+
+    override fun assetUrl(spec: ModelFileSpec): String = "$baseUrl/${spec.name}"
 }
 
 object VitsModelRegistry {

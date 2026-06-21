@@ -46,7 +46,7 @@ data class VitsModelState(
  */
 class VitsModelManager(
     private val context: Context,
-    private val descriptor: VitsModelDescriptor,
+    private val descriptor: TtsModelPackDescriptor,
 ) {
     private val workManager by lazy { WorkManager.getInstance(context) }
     private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
@@ -169,7 +169,7 @@ class VitsModelManager(
 
         fun modelDir(context: Context): File = modelDir(context, VitsModelRegistry.WNJ)
 
-        fun modelDir(context: Context, descriptor: VitsModelDescriptor): File =
+        fun modelDir(context: Context, descriptor: TtsModelPackDescriptor): File =
             File(context.filesDir, descriptor.dirName)
 
         fun isReady(context: Context): Boolean = isReady(context, VitsModelRegistry.WNJ)
@@ -177,19 +177,19 @@ class VitsModelManager(
         /**
          * Fast, non-blocking readiness check used by the UI, WorkManager Flow
          * and TTS service. It only verifies that the ready marker exists, that
-         * it carries the descriptor's pinned [VitsModelDescriptor.revision], and
+         * it carries the descriptor's pinned [TtsModelPackDescriptor.revision], and
          * that every expected file is present with the expected size. Full
          * SHA-256 verification is performed by [VitsModelDownloadWorker] before
          * the marker is written, so a present marker with a matching revision
          * implies the files were hash-verified at download time.
          */
-        fun isReady(context: Context, descriptor: VitsModelDescriptor): Boolean =
+        fun isReady(context: Context, descriptor: TtsModelPackDescriptor): Boolean =
             isReadyFast(modelDir(context, descriptor), descriptor)
 
-        internal fun isReadyFast(context: Context, descriptor: VitsModelDescriptor): Boolean =
+        internal fun isReadyFast(context: Context, descriptor: TtsModelPackDescriptor): Boolean =
             isReadyFast(modelDir(context, descriptor), descriptor)
 
-        internal fun isReadyFast(dir: File, descriptor: VitsModelDescriptor): Boolean {
+        internal fun isReadyFast(dir: File, descriptor: TtsModelPackDescriptor): Boolean {
             val marker = File(dir, descriptor.readyMarkerName)
             if (!marker.isFile) return false
             val markerRevision = runCatching { marker.readText().trim() }.getOrNull()
@@ -213,7 +213,7 @@ class VitsModelManager(
         internal fun readyFile(context: Context): File =
             File(modelDir(context), VitsModelRegistry.WNJ.readyMarkerName)
 
-        internal fun readyFile(context: Context, descriptor: VitsModelDescriptor): File =
+        internal fun readyFile(context: Context, descriptor: TtsModelPackDescriptor): File =
             File(modelDir(context, descriptor), descriptor.readyMarkerName)
 
         /**
@@ -229,8 +229,9 @@ class VitsModelManager(
         internal fun verifyFilesInDir(dir: File, specs: List<ModelFileSpec>): List<ModelFileStatus> =
             specs.map { spec ->
                 val file = File(dir, spec.name)
-                val valid = file.isFile && file.length() == spec.size && sha256(file) == spec.sha256
-                ModelFileStatus(spec, file, valid)
+                val sizeOk = file.isFile && file.length() == spec.size
+                val hashOk = !sizeOk || spec.sha256.isEmpty() || sha256(file) == spec.sha256
+                ModelFileStatus(spec, file, sizeOk && hashOk)
             }
 
         internal val MODEL_SPECS: List<ModelFileSpec>
@@ -261,7 +262,11 @@ class VitsModelDownloadWorker(
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val id = VitsModelId.fromStableValue(inputData.getString(VitsModelManager.KEY_MODEL_ID))
             ?: return@withContext failure("未知模型 ID")
-        val descriptor = VitsModelRegistry.byId(id)
+        val descriptor = try {
+            EmbeddedModelRegistry.byId(id)
+        } catch (_: NoSuchElementException) {
+            return@withContext failure("未知模型 ID")
+        }
         val dir = VitsModelManager.modelDir(applicationContext, descriptor).apply { mkdirs() }
         VitsModelManager.readyFile(applicationContext, descriptor).delete()
         val specs = descriptor.specs
@@ -292,12 +297,19 @@ class VitsModelDownloadWorker(
     }
 
     private suspend fun download(
-        descriptor: VitsModelDescriptor,
+        descriptor: TtsModelPackDescriptor,
         spec: ModelFileSpec,
         target: File,
         completedBefore: Long,
     ) {
-        if (target.isFile && target.length() == spec.size && VitsModelManager.sha256(target) == spec.sha256) return
+        target.parentFile?.mkdirs()
+        // Files without a known SHA-256 are still size-checked below; an empty
+        // `sha256` field is the descriptor's explicit "no upstream reference"
+        // signal and is treated as "matches".
+        val hasHash = spec.sha256.isNotEmpty()
+        if (target.isFile && target.length() == spec.size &&
+            (!hasHash || VitsModelManager.sha256(target) == spec.sha256)
+        ) return
         val partial = File(target.parentFile, "${target.name}.part")
         var downloaded = partial.takeIf { it.isFile }?.length()?.coerceAtMost(spec.size) ?: 0L
         if (partial.length() > spec.size) {
@@ -305,7 +317,7 @@ class VitsModelDownloadWorker(
             downloaded = 0L
         }
         if (downloaded == spec.size) {
-            if (VitsModelManager.sha256(partial) == spec.sha256) {
+            if (!hasHash || VitsModelManager.sha256(partial) == spec.sha256) {
                 if (target.exists()) target.delete()
                 check(partial.renameTo(target)) { "无法保存 ${spec.name}" }
                 return
@@ -313,7 +325,7 @@ class VitsModelDownloadWorker(
             partial.delete()
             downloaded = 0L
         }
-        val connection = (URL("${descriptor.baseUrl}/${spec.name}").openConnection() as HttpURLConnection).apply {
+        val connection = (URL(descriptor.assetUrl(spec)).openConnection() as HttpURLConnection).apply {
             connectTimeout = 20_000
             readTimeout = 30_000
             instanceFollowRedirects = true
@@ -369,7 +381,7 @@ class VitsModelDownloadWorker(
             partial.delete()
             error("${spec.name} 文件大小不正确")
         }
-        if (VitsModelManager.sha256(partial) != spec.sha256) {
+        if (hasHash && VitsModelManager.sha256(partial) != spec.sha256) {
             partial.delete()
             error("${spec.name} 校验失败")
         }

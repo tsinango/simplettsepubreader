@@ -15,7 +15,10 @@ import com.example.epubreader.data.ParsedBook
 import com.example.epubreader.data.ReaderSettingsEntity
 import com.example.epubreader.data.ReadingLocatorEntity
 import com.example.epubreader.data.SentenceRef
+import com.example.epubreader.tts.EmbeddedModelRegistry
+import com.example.epubreader.tts.EmbeddedModelSelectionStore
 import com.example.epubreader.tts.ReaderTtsService
+import com.example.epubreader.tts.TtsModelPackDescriptor
 import com.example.epubreader.tts.TtsPerformanceSnapshot
 import com.example.epubreader.tts.TtsPerformanceStore
 import com.example.epubreader.tts.VitsModelDescriptor
@@ -80,8 +83,9 @@ data class LibraryUiState(
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = (application as ReaderApplication).repository
     private val modelManagers: Map<VitsModelId, VitsModelManager> =
-        VitsModelRegistry.all.associate { it.id to VitsModelManager(application, it) }
+        EmbeddedModelRegistry.all.associate { it.id to VitsModelManager(application, it) }
     private val ttsPerformanceStore = TtsPerformanceStore(application)
+    val embeddedSelectionStore = EmbeddedModelSelectionStore(application)
 
     val settings = repository.settings.stateIn(
         viewModelScope,
@@ -90,13 +94,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
     val vitsModelStates: StateFlow<Map<VitsModelId, VitsModelState>> =
         combine(
-            *VitsModelRegistry.all.map { modelManagers.getValue(it.id).state }.toTypedArray(),
+            *EmbeddedModelRegistry.all.map { modelManagers.getValue(it.id).state }.toTypedArray(),
         ) { states ->
-            VitsModelRegistry.all.mapIndexed { i, d -> d.id to states[i] }.toMap()
+            EmbeddedModelRegistry.all.mapIndexed { i, d -> d.id to states[i] }.toMap()
         }.stateIn(
             viewModelScope,
             SharingStarted.WhileSubscribed(5000),
-            VitsModelRegistry.all.associate { it.id to modelManagers.getValue(it.id).currentState() },
+            EmbeddedModelRegistry.all.associate { it.id to modelManagers.getValue(it.id).currentState() },
         )
     private val _ttsPerformance = MutableStateFlow(
         ttsPerformanceStore.snapshot(VitsModelRegistry.WNJ.revision, VitsModelRegistry.WNJ.id.stableValue),
@@ -162,7 +166,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             vitsModelStates.collect { states ->
                 val pendingId = modelManagers.values.firstNotNullOfOrNull { it.pendingSwitchTarget() }
                 if (pendingId == null) return@collect
-                val pendingDescriptor = VitsModelRegistry.byId(pendingId)
+                val pendingDescriptor: TtsModelPackDescriptor = EmbeddedModelRegistry.byId(pendingId)
                 val pendingManager = modelManagers.getValue(pendingId)
                 if (states[pendingId]?.status == VitsModelStatus.READY) {
                     pendingManager.clearPendingSwitch()
@@ -176,7 +180,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             settings.collect { s ->
                 val modelId = VitsModelId.fromStableValue(s?.vitsModelId) ?: VitsModelId.FANCHEN_WNJ
-                val descriptor = VitsModelRegistry.byId(modelId)
+                val descriptor = EmbeddedModelRegistry.byId(modelId)
                 _ttsPerformance.value =
                     ttsPerformanceStore.snapshot(descriptor.revision, descriptor.id.stableValue)
             }
@@ -425,7 +429,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun useVitsModel(id: VitsModelId) {
         val manager = modelManagers.getValue(id)
-        val descriptor = VitsModelRegistry.byId(id)
+        val descriptor = EmbeddedModelRegistry.byId(id)
         if (VitsModelManager.isReady(getApplication(), descriptor)) {
             manager.clearPendingSwitch()
             updateSettings(
@@ -448,6 +452,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         manager.cancel()
     }
 
+    fun setEmbeddedSpeakerId(id: VitsModelId, sid: Int) {
+        embeddedSelectionStore.setSpeakerId(id.stableValue, sid)
+        if (_readerPosition.value.isSpeaking) sendAction(ReaderTtsService.ACTION_SETTINGS_CHANGED)
+    }
+
+    fun setEmbeddedRate(id: VitsModelId, rate: Float) {
+        embeddedSelectionStore.setRate(id.stableValue, rate.coerceIn(0.5f, 2f))
+        if (_readerPosition.value.isSpeaking) sendAction(ReaderTtsService.ACTION_SETTINGS_CHANGED)
+    }
+
     fun deleteVitsModel(id: VitsModelId) {
         val manager = modelManagers.getValue(id)
         manager.clearPendingSwitch(id)
@@ -460,7 +474,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshTtsPerformance() {
         val modelId = VitsModelId.fromStableValue(settings.value?.vitsModelId) ?: VitsModelId.FANCHEN_WNJ
-        val descriptor = VitsModelRegistry.byId(modelId)
+        val descriptor = EmbeddedModelRegistry.byId(modelId)
         _ttsPerformance.value = ttsPerformanceStore.snapshot(descriptor.revision, descriptor.id.stableValue)
     }
 

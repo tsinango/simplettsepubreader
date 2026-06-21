@@ -26,10 +26,14 @@ import androidx.compose.ui.unit.dp
 import com.example.epubreader.MainViewModel
 import com.example.epubreader.R
 import com.example.epubreader.data.ReaderSettingsEntity
+import com.example.epubreader.tts.EmbeddedModelRegistry
+import com.example.epubreader.tts.KokoroModelRegistry
+import com.example.epubreader.tts.SpeakerEntry
+import com.example.epubreader.tts.SpeakerGender
+import com.example.epubreader.tts.TtsEngineKind
+import com.example.epubreader.tts.TtsModelPackDescriptor
 import com.example.epubreader.tts.TtsPerformanceSnapshot
-import com.example.epubreader.tts.VitsModelDescriptor
 import com.example.epubreader.tts.VitsModelId
-import com.example.epubreader.tts.VitsModelRegistry
 import com.example.epubreader.tts.VitsModelState
 import com.example.epubreader.tts.VitsModelStatus
 
@@ -43,6 +47,8 @@ fun SettingsDialog(
     onUseVitsModel: (VitsModelId) -> Unit,
     onCancelVitsDownload: (VitsModelId) -> Unit,
     onDeleteVitsModel: (VitsModelId) -> Unit,
+    onSetEmbeddedSpeakerId: (VitsModelId, Int) -> Unit,
+    onSetEmbeddedRate: (VitsModelId, Float) -> Unit,
     onExportDiagnostics: () -> Unit,
     diagnosticExportMessage: String?,
     onClearDiagnostics: () -> Unit,
@@ -53,6 +59,7 @@ fun SettingsDialog(
     var value by remember { mutableStateOf(current) }
     var confirmDownloadModel by remember { mutableStateOf<VitsModelId?>(null) }
     var confirmClearLog by remember { mutableStateOf(false) }
+    var kokoroSpeakerPickerForId by remember { mutableStateOf<VitsModelId?>(null) }
     LaunchedEffect(current.ttsEngine, current.vitsModelId) {
         value = value.copy(ttsEngine = current.ttsEngine, vitsModelId = current.vitsModelId)
     }
@@ -77,8 +84,8 @@ fun SettingsDialog(
                             context.getString(R.string.system_tts_checked) else context.getString(R.string.system_tts))
                     }
                 }
-                VitsModelRegistry.all.forEach { descriptor ->
-                    VitsModelSection(
+                EmbeddedModelRegistry.all.forEach { descriptor ->
+                    EmbeddedModelSection(
                         descriptor = descriptor,
                         state = modelStates[descriptor.id] ?: VitsModelState(VitsModelStatus.NOT_DOWNLOADED),
                         selected = value.ttsEngine == MainViewModel.TTS_ENGINE_VITS &&
@@ -99,6 +106,9 @@ fun SettingsDialog(
                         onDownload = { onUseVitsModel(descriptor.id) },
                         onCancel = { onCancelVitsDownload(descriptor.id) },
                         onDelete = { onDeleteVitsModel(descriptor.id) },
+                        onSetSpeakerId = { sid -> onSetEmbeddedSpeakerId(descriptor.id, sid) },
+                        onSetRate = { rate -> onSetEmbeddedRate(descriptor.id, rate) },
+                        onPickSpeaker = { kokoroSpeakerPickerForId = descriptor.id },
                     )
                 }
                 Text(context.getString(R.string.theme_label))
@@ -138,7 +148,7 @@ fun SettingsDialog(
         },
     )
     confirmDownloadModel?.let { id ->
-        val descriptor = VitsModelRegistry.byId(id)
+        val descriptor = EmbeddedModelRegistry.byId(id)
         AlertDialog(
             onDismissRequest = { confirmDownloadModel = null },
             title = { Text(context.getString(R.string.download_model)) },
@@ -147,6 +157,16 @@ fun SettingsDialog(
                     Text(context.getString(R.string.download_model_message, descriptor.sizeLabel))
                     Text(
                         descriptor.description,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (descriptor.engineKind == TtsEngineKind.BERT_VITS2_MNN) {
+                        Text(
+                            "示例角色资产来自上游 Bert-VITS2-MNN（仅供学习交流，禁商业用途）",
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    Text(
+                        "License: ${descriptor.license}",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -159,6 +179,19 @@ fun SettingsDialog(
             dismissButton = {
                 TextButton(onClick = { confirmDownloadModel = null }) { Text(context.getString(R.string.cancel)) }
             },
+        )
+    }
+    kokoroSpeakerPickerForId?.let { id ->
+        val descriptor = EmbeddedModelRegistry.byId(id)
+        val speakers = descriptor.speakerMetadata.orEmpty()
+        val zhSpeakers = speakers.filter { it.language == "ZH" }
+        KokoroSpeakerPicker(
+            speakers = zhSpeakers,
+            onPick = { sid ->
+                onSetEmbeddedSpeakerId(id, sid)
+                kokoroSpeakerPickerForId = null
+            },
+            onDismiss = { kokoroSpeakerPickerForId = null },
         )
     }
     if (confirmClearLog) {
@@ -177,8 +210,8 @@ fun SettingsDialog(
 }
 
 @Composable
-private fun VitsModelSection(
-    descriptor: VitsModelDescriptor,
+private fun EmbeddedModelSection(
+    descriptor: TtsModelPackDescriptor,
     state: VitsModelState,
     selected: Boolean,
     performance: TtsPerformanceSnapshot,
@@ -186,6 +219,9 @@ private fun VitsModelSection(
     onDownload: () -> Unit,
     onCancel: () -> Unit,
     onDelete: () -> Unit,
+    onSetSpeakerId: (Int) -> Unit,
+    onSetRate: (Float) -> Unit,
+    onPickSpeaker: () -> Unit,
 ) {
     val context = LocalContext.current
     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -205,6 +241,14 @@ private fun VitsModelSection(
         VitsModelStatus.READY -> {
             TextButton(onClick = onDelete) {
                 Text(context.getString(R.string.delete_model_label, descriptor.sizeLabel))
+            }
+            if (descriptor.engineKind == TtsEngineKind.SHERPA_KOKORO && selected) {
+                KokoroSelectionUi(
+                    speakers = descriptor.speakerMetadata.orEmpty(),
+                    setSpeakerId = onSetSpeakerId,
+                    setRate = onSetRate,
+                    onPickSpeaker = onPickSpeaker,
+                )
             }
             if (selected && performance.modelId == descriptor.id.stableValue) {
                 Text(
@@ -228,6 +272,56 @@ private fun VitsModelSection(
             TextButton(onClick = onDownload) { Text(context.getString(R.string.download)) }
         }
     }
+}
+
+@Composable
+private fun KokoroSelectionUi(
+    speakers: List<SpeakerEntry>,
+    setSpeakerId: (Int) -> Unit,
+    setRate: (Float) -> Unit,
+    onPickSpeaker: () -> Unit,
+) {
+    var rate by remember { mutableStateOf(KokoroModelRegistry.DEFAULT_USER_RATE) }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        TextButton(onClick = onPickSpeaker) { Text("中文说话人选择…") }
+        Text("Kokoro 速度 ${"%.1f".format(rate)}x")
+        Slider(rate, { rate = it; setRate(it) }, valueRange = 0.5f..2f)
+    }
+}
+
+@Composable
+private fun KokoroSpeakerPicker(
+    speakers: List<SpeakerEntry>,
+    onPick: (Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择中文说话人") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Column {
+                    Text("女声（${speakers.count { it.gender == SpeakerGender.FEMALE }}）", fontWeight = FontWeight.Bold)
+                    speakers.filter { it.gender == SpeakerGender.FEMALE }.forEach { s ->
+                        TextButton(onClick = { onPick(s.id) }) {
+                            Text("${s.id}: ${s.name}")
+                        }
+                    }
+                }
+                Column {
+                    Text("男声（${speakers.count { it.gender == SpeakerGender.MALE }}）", fontWeight = FontWeight.Bold)
+                    speakers.filter { it.gender == SpeakerGender.MALE }.forEach { s ->
+                        TextButton(onClick = { onPick(s.id) }) {
+                            Text("${s.id}: ${s.name}")
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
 }
 
 @Composable

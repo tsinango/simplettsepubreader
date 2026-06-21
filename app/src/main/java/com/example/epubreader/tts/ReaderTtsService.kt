@@ -28,6 +28,7 @@ import com.example.epubreader.data.SentenceRef
 import com.example.epubreader.MainViewModel
 import com.example.epubreader.tts.engine.EmbeddedTtsEngine
 import com.example.epubreader.tts.engine.EngineSwitchGate
+import com.example.epubreader.tts.engine.KokoroSherpaEngine
 import com.example.epubreader.tts.engine.SherpaVitsEngine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -61,8 +62,11 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private var utteranceSerial = 0
     private var currentUtteranceId: String? = null
     @Volatile private var activeEngine = MainViewModel.TTS_ENGINE_SYSTEM
-    @Volatile private var activeVitsDescriptor: VitsModelDescriptor = VitsModelRegistry.WNJ
+    @Volatile private var activePack: TtsModelPackDescriptor = VitsModelRegistry.WNJ
+    @Volatile private var currentEmbeddedSid: Int = 0
+    @Volatile private var currentEmbeddedUserRate: Float = 1f
     private val engineGate = EngineSwitchGate()
+    private val embeddedSelection by lazy { EmbeddedModelSelectionStore(this) }
     private lateinit var pipeline: EmbeddedPlaybackPipeline
     private var generationJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -353,11 +357,33 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         val settings = repository.settings.first()
         activeEngine = settings?.ttsEngine ?: MainViewModel.TTS_ENGINE_SYSTEM
         val modelId = VitsModelId.fromStableValue(settings?.vitsModelId) ?: VitsModelId.FANCHEN_WNJ
-        activeVitsDescriptor = VitsModelRegistry.byId(modelId)
+        activePack = EmbeddedModelRegistry.byId(modelId)
         speechRate = TtsRatePolicy.userRate(settings?.speechRate ?: 1f)
+        when (activePack.engineKind) {
+            TtsEngineKind.SHERPA_KOKORO -> {
+                currentEmbeddedSid = embeddedSelection.speakerId(
+                    activePack.id.stableValue,
+                    KokoroModelRegistry.DEFAULT_CHINESE_FEMALE_SID,
+                )
+                currentEmbeddedUserRate = TtsRatePolicy.userRate(
+                    embeddedSelection.rate(activePack.id.stableValue, KokoroModelRegistry.DEFAULT_USER_RATE),
+                )
+            }
+            TtsEngineKind.BERT_VITS2_MNN -> {
+                currentEmbeddedSid = embeddedSelection.speakerId(activePack.id.stableValue, 0)
+                currentEmbeddedUserRate = TtsRatePolicy.userRate(
+                    embeddedSelection.rate(activePack.id.stableValue, 1f),
+                )
+            }
+            TtsEngineKind.SHERPA_VITS -> {
+                currentEmbeddedSid = 0
+                currentEmbeddedUserRate = speechRate
+            }
+        }
         DiagnosticLogger.event(
             "TTS_SETTINGS",
-            "engine=$activeEngine model=${activeVitsDescriptor.id.stableValue} rate=$speechRate pitch=${settings?.pitch ?: 1f}",
+            "engine=$activeEngine model=${activePack.id.stableValue} rate=$speechRate " +
+                "embeddedSid=$currentEmbeddedSid embeddedRate=$currentEmbeddedUserRate pitch=${settings?.pitch ?: 1f}",
         )
         tts?.setSpeechRate(speechRate)
         tts?.setPitch(settings?.pitch ?: 1f)
@@ -422,10 +448,10 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun speakEmbedded(sentence: SentenceRef) {
-        val descriptor = activeVitsDescriptor
-        val candidate = engineGate.candidate(descriptor, descriptor.id.stableValue, ::createEmbeddedEngine)
+        val pack = activePack
+        val candidate = engineGate.candidate(pack, pack.id.stableValue, ::createEmbeddedEngine)
         if (!candidate.isAvailable(this)) {
-            DiagnosticLogger.event("VITS", "model_not_ready model=${descriptor.id.stableValue}")
+            DiagnosticLogger.event("VITS", "model_not_ready model=${pack.id.stableValue}")
             scope.launch { fallbackToSystem("内置语音模型不可用，已切换到系统 TTS") }
             return
         }
@@ -480,14 +506,14 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
             if (!isGenerationCurrent(serial)) return@withLock null
             val engine = withContext(Dispatchers.Default) { ensureEngine() }
             val startedAt = SystemClock.elapsedRealtime()
-            val engineSpeed = vitsEngineSpeed(speechRate)
+            val (sid, engineSpeed) = currentSidAndSpeed()
             DiagnosticLogger.event(
                 "VITS_GENERATE",
                 "start serial=$serial chunk=${chunk.index} length=${chunk.text.length} " +
-                    "rate=$speechRate engineSpeed=$engineSpeed",
+                    "rate=$speechRate engineSpeed=$engineSpeed sid=$sid kind=${activePack.engineKind}",
             )
             val generated = withContext(Dispatchers.Default) {
-                engine.synthesize(chunk.text, sid = 0, speed = engineSpeed)
+                engine.synthesize(chunk.text, sid = sid, speed = engineSpeed)
             }
             if (!isGenerationCurrent(serial) || generated.samples.isEmpty()) return@withLock null
             val silenceSamples = chunk.pauseMs * generated.sampleRate / 1000
@@ -513,12 +539,18 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
             )
         }
 
+    private fun currentSidAndSpeed(): Pair<Int, Float> = when (activePack.engineKind) {
+        TtsEngineKind.SHERPA_VITS -> 0 to vitsEngineSpeed(speechRate)
+        TtsEngineKind.SHERPA_KOKORO -> currentEmbeddedSid to currentEmbeddedUserRate
+        TtsEngineKind.BERT_VITS2_MNN -> currentEmbeddedSid to currentEmbeddedUserRate
+    }
+
     private fun isGenerationCurrent(serial: Int): Boolean =
         playing && activeEngine == MainViewModel.TTS_ENGINE_VITS && serial == embeddedGenerationSerial
 
     private fun ensureEngine(): EmbeddedTtsEngine {
-        val descriptor = activeVitsDescriptor
-        val engine = engineGate.candidate(descriptor, descriptor.id.stableValue, ::createEmbeddedEngine)
+        val pack = activePack
+        val engine = engineGate.candidate(pack, pack.id.stableValue, ::createEmbeddedEngine)
         if (engineGate.isBuilt(engine)) return engine
         val numThreads = engineThreads
         val startedAt = SystemClock.elapsedRealtime()
@@ -530,13 +562,16 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         }
         DiagnosticLogger.event(
             "VITS_ENGINE",
-            "ready model=${descriptor.id.stableValue} initMs=$lastEngineInitMillis threads=$numThreads",
+            "ready model=${pack.id.stableValue} kind=${pack.engineKind} initMs=$lastEngineInitMillis threads=$numThreads",
         )
         return engine
     }
 
-    private fun createEmbeddedEngine(descriptor: VitsModelDescriptor): EmbeddedTtsEngine =
-        SherpaVitsEngine(descriptor)
+    private fun createEmbeddedEngine(pack: TtsModelPackDescriptor): EmbeddedTtsEngine = when (pack) {
+        is VitsModelDescriptor -> SherpaVitsEngine(pack)
+        is KokoroModelDescriptor -> KokoroSherpaEngine(pack)
+        else -> error("Unsupported pack kind for descriptor: ${pack::class}")
+    }
 
     private suspend fun handleSentenceComplete(key: String) {
         if (!playing) return
@@ -621,7 +656,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
 
     private fun savePerformanceMetrics() {
         performanceStore.saveMetrics(
-            modelRevision = activeVitsDescriptor.revision,
+            modelRevision = activePack.revision,
             engineInitMillis = lastEngineInitMillis,
             firstAudioMillis = lastFirstAudioMillis,
             generationMillis = lastGenerationMillis,

@@ -272,6 +272,8 @@ fun ReaderScreen(
             onUseVitsModel = vm::useVitsModel,
             onCancelVitsDownload = vm::cancelVitsDownload,
             onDeleteVitsModel = vm::deleteVitsModel,
+            onSetEmbeddedSpeakerId = vm::setEmbeddedSpeakerId,
+            onSetEmbeddedRate = vm::setEmbeddedRate,
             onExportDiagnostics = {
                 diagnosticExportMessage = null
                 diagnosticExporter.launch(DiagnosticLogger.defaultExportFileName())
