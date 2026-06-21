@@ -85,6 +85,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _bookProgress = MutableStateFlow<Map<String, Float>>(emptyMap())
     val bookProgress: StateFlow<Map<String, Float>> = _bookProgress
 
+    private val _deleteResult = MutableStateFlow<String?>(null)
+    val deleteResult: StateFlow<String?> = _deleteResult
+
     private var sleepTimerJob: Job? = null
     private val ttsStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -133,6 +136,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         runCatching { repository.import(uri) }
             .onSuccess { open(it.id) }
             .onFailure { _reader.value = ReaderUiState(error = it.message ?: "导入失败") }
+    }
+
+    fun clearDeleteResult() {
+        _deleteResult.value = null
+    }
+
+    fun deleteBook(bookId: String) = viewModelScope.launch {
+        val currentBookId = _reader.value.book?.id
+        if (bookId == currentBookId) {
+            if (_readerPosition.value.isSpeaking) {
+                sendAction(ReaderTtsService.ACTION_STOP)
+            }
+            _reader.value = ReaderUiState()
+            _readerPosition.value = ReaderPositionState()
+        }
+        runCatching {
+            repository.deleteBook(bookId)
+        }.onFailure {
+            _deleteResult.value = it.message ?: "删除失败"
+        }
     }
 
     fun clearError() {

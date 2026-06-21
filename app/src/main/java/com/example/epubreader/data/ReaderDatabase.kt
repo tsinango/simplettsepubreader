@@ -37,6 +37,12 @@ interface ReaderDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun saveSettings(settings: ReaderSettingsEntity)
+
+    @Query("DELETE FROM books WHERE id = :id")
+    suspend fun deleteBook(id: String)
+
+    @Query("DELETE FROM locators WHERE bookId = :bookId")
+    suspend fun deleteLocator(bookId: String)
 }
 
 @Database(

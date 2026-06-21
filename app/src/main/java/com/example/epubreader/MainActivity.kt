@@ -41,7 +41,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
@@ -51,6 +53,8 @@ import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -58,6 +62,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -147,8 +153,18 @@ private fun LibraryScreen(
     onOpen: (String) -> Unit,
 ) {
     val books by vm.books.collectAsStateWithLifecycle()
+    val deleteResult by vm.deleteResult.collectAsStateWithLifecycle()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) {
         it?.let(vm::import)
+    }
+    val snackbarHostState = remember { SnackbarHostState() }
+    var menuBookId by remember { mutableStateOf<String?>(null) }
+    var deleteTarget by remember { mutableStateOf<BookEntity?>(null) }
+
+    LaunchedEffect(deleteResult) {
+        val msg = deleteResult ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(msg)
+        vm.clearDeleteResult()
     }
 
     Scaffold(
@@ -158,6 +174,7 @@ private fun LibraryScreen(
                 Icon(Icons.Default.Add, "导入 EPUB")
             }
         },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
         if (books.isEmpty()) {
             Box(
@@ -182,11 +199,61 @@ private fun LibraryScreen(
                             .fillMaxWidth()
                             .clickable { onOpen(book.id) },
                     ) {
-                        BookListRow(book, progress[book.id] ?: 0f)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            BookListRow(book, progress[book.id] ?: 0f, Modifier.weight(1f))
+                            Box {
+                                IconButton(onClick = { menuBookId = book.id }) {
+                                    Icon(Icons.Default.MoreVert, "更多操作")
+                                }
+                                DropdownMenu(
+                                    expanded = menuBookId == book.id,
+                                    onDismissRequest = { menuBookId = null },
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("删除书籍") },
+                                        leadingIcon = {
+                                            Icon(Icons.Default.Delete, null)
+                                        },
+                                        onClick = {
+                                            menuBookId = null
+                                            deleteTarget = book
+                                        },
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+
+    deleteTarget?.let { book ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("删除书籍") },
+            text = {
+                Text(
+                    "确定删除《${book.title}》吗？阅读进度也将被清除。\n\n" +
+                        "仅删除 App 内复制的文件，不影响原始文件。",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        deleteTarget = null
+                        vm.deleteBook(book.id)
+                    },
+                ) {
+                    Text("删除", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteTarget = null }) {
+                    Text("取消")
+                }
+            },
+        )
     }
 }
 
@@ -194,10 +261,10 @@ private fun LibraryScreen(
 private fun BookListRow(
     book: BookEntity,
     progress: Float,
+    modifier: Modifier = Modifier,
 ) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
+        modifier = modifier
             .padding(14.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp),
         verticalAlignment = Alignment.CenterVertically,
