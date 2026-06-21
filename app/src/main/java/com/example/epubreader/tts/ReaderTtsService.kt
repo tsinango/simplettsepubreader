@@ -43,7 +43,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlin.jvm.functions.Function1
 import java.util.Locale
 
 class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
@@ -485,12 +484,12 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
             )
             val generated = withContext(Dispatchers.Default) {
                 val job = coroutineContext[Job]
-                val callback = GenerationCancellationCallback(job, serial, this@ReaderTtsService)
                 engine.generateWithConfigAndCallback(
                     chunk.text,
                     genConfig,
-                    callback,
-                )
+                ) {
+                    if (job?.isActive == true && isGenerationCurrent(serial)) 1 else 0
+                }
             }
             if (!isGenerationCurrent(serial) || generated.samples.isEmpty()) return@withLock null
             val silenceSamples = chunk.pauseMs * generated.sampleRate / 1000
@@ -518,15 +517,6 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
 
     private fun isGenerationCurrent(serial: Int): Boolean =
         playing && activeEngine == MainViewModel.TTS_ENGINE_VITS && serial == embeddedGenerationSerial
-
-    private class GenerationCancellationCallback(
-        private val job: Job?,
-        private val serial: Int,
-        private val service: ReaderTtsService,
-    ) : Function1<FloatArray, Int> {
-        override fun invoke(p1: FloatArray): Int =
-            if (job?.isActive == true && service.isGenerationCurrent(serial)) 1 else 0
-    }
 
     private fun embeddedTts(): OfflineTts = offlineTts ?: run {
         val startedAt = SystemClock.elapsedRealtime()

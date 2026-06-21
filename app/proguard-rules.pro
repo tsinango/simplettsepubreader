@@ -4,7 +4,11 @@
 # native method lookup in release builds.
 -keep class com.k2fsa.sherpa.onnx.** { *; }
 
-# GenerationCancellationCallback is passed to native JNI code (OfflineTts JNI callback).
-# R8 must not rename its invoke() method because the native library resolves it by
-# signature at runtime via JNI GetMethodID.
--keep class com.example.epubreader.tts.ReaderTtsService$GenerationCancellationCallback { *; }
+# R8 may remove or rename the invoke() method on lambda classes that are
+# passed to native JNI callbacks (OfflineTts.generateWithConfigAndCallback).
+# The native code resolves invoke() by signature at runtime via JNI GetMethodID,
+# so the method name and signature must be preserved across all Function1
+# implementations used in the app.
+-keepclassmembers class * implements kotlin.jvm.functions.Function1 {
+    *** invoke(...);
+}
