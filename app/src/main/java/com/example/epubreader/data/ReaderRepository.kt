@@ -83,20 +83,18 @@ class ReaderRepository(
     suspend fun locator(bookId: String) = dao.locator(bookId)
     suspend fun deleteBook(bookId: String): BookEntity? {
         val book = dao.book(bookId) ?: return null
+        synchronized(cacheLock) {
+            parsedCache.remove(bookId)
+        }
+        dao.deleteLocator(bookId)
+        dao.deleteBook(bookId)
         val epubFile = File(book.localPath)
         if (epubFile.exists() && !epubFile.delete()) {
             error("无法删除本地文件 ${epubFile.name}")
         }
         book.coverPath?.let { path ->
             val coverFile = File(path)
-            if (coverFile.exists() && !coverFile.delete()) {
-                error("无法删除封面文件 ${coverFile.name}")
-            }
-        }
-        dao.deleteLocator(bookId)
-        dao.deleteBook(bookId)
-        synchronized(cacheLock) {
-            parsedCache.remove(bookId)
+            if (coverFile.exists()) coverFile.delete()
         }
         return book
     }

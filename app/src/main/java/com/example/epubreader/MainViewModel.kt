@@ -21,14 +21,19 @@ import com.example.epubreader.tts.TtsPerformanceStore
 import com.example.epubreader.tts.VitsModelManager
 import com.example.epubreader.tts.VitsModelState
 import com.example.epubreader.tts.VitsModelStatus
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 data class ReaderUiState(
     val book: BookEntity? = null,
@@ -88,6 +93,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _deleteResult = MutableStateFlow<String?>(null)
     val deleteResult: StateFlow<String?> = _deleteResult
 
+    private val deletingBookIds = mutableSetOf<String>()
     private var sleepTimerJob: Job? = null
     private val ttsStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -143,18 +149,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteBook(bookId: String) = viewModelScope.launch {
-        val currentBookId = _reader.value.book?.id
-        if (bookId == currentBookId) {
-            if (_readerPosition.value.isSpeaking) {
-                sendAction(ReaderTtsService.ACTION_STOP)
+        if (!deletingBookIds.add(bookId)) return@launch
+        try {
+            val currentBookId = _reader.value.book?.id
+            if (bookId == currentBookId) {
+                if (_readerPosition.value.isSpeaking) {
+                    sendAction(ReaderTtsService.ACTION_STOP)
+                    try {
+                        withTimeout(3_000L) {
+                            _readerPosition
+                                .filter { !it.isSpeaking }
+                                .first()
+                        }
+                    } catch (_: TimeoutCancellationException) {
+                        // Expected if TTS stop takes too long — proceed
+                    }
+                }
+                _reader.value = ReaderUiState()
+                _readerPosition.value = ReaderPositionState()
             }
-            _reader.value = ReaderUiState()
-            _readerPosition.value = ReaderPositionState()
-        }
-        runCatching {
-            repository.deleteBook(bookId)
-        }.onFailure {
-            _deleteResult.value = it.message ?: "删除失败"
+            withContext(Dispatchers.IO) {
+                repository.deleteBook(bookId)
+            }
+        } catch (e: Throwable) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            _deleteResult.value = e.message ?: "删除失败"
+        } finally {
+            deletingBookIds.remove(bookId)
         }
     }
 
