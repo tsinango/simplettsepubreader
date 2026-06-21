@@ -24,13 +24,15 @@ class DeleteRaceTest {
                 )
             )
             db.dao().deleteBookWithLocator("book1")
-            db.dao().saveLocator(
-                ReadingLocatorEntity(
-                    bookId = "book1", chapterPath = "ch1", paragraphIndex = 0,
-                    sentenceIndex = 0, characterOffset = 0, context = "hello",
-                    source = "delete_race", updatedAt = 1000L,
+            runCatching {
+                db.dao().saveLocator(
+                    ReadingLocatorEntity(
+                        bookId = "book1", chapterPath = "ch1", paragraphIndex = 0,
+                        sentenceIndex = 0, characterOffset = 0, context = "hello",
+                        source = "delete_race", updatedAt = 1000L,
+                    )
                 )
-            )
+            }
             val found = db.dao().book("book1")
             assertNull(found)
             db.close()

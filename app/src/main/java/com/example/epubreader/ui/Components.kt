@@ -63,24 +63,26 @@ fun BookCover(title: String, coverPath: String?) {
     }
 }
 
-private fun decodeCoverSampled(path: String): Bitmap? = try {
-    val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeFile(path, opts)
-    val (origW, origH) = (opts.outWidth to opts.outHeight)
-    if (origW <= 0 || origH <= 0) return null
-    var sampleSize = 1
-    while (origW / sampleSize > COVER_TARGET_WIDTH * 2 || origH / sampleSize > COVER_TARGET_HEIGHT * 2) {
-        sampleSize *= 2
+private fun decodeCoverSampled(path: String): Bitmap? {
+    return try {
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, opts)
+        val (origW, origH) = (opts.outWidth to opts.outHeight)
+        if (origW <= 0 || origH <= 0) return null
+        var sampleSize = 1
+        while (origW / sampleSize > COVER_TARGET_WIDTH * 2 || origH / sampleSize > COVER_TARGET_HEIGHT * 2) {
+            sampleSize *= 2
+        }
+        val decodeOpts = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+            inMutable = false
+        }
+        BitmapFactory.decodeFile(path, decodeOpts)
+    } catch (_: OutOfMemoryError) {
+        null
+    } catch (_: Exception) {
+        null
     }
-    val decodeOpts = BitmapFactory.Options().apply {
-        inSampleSize = sampleSize
-        inMutable = false
-    }
-    BitmapFactory.decodeFile(path, decodeOpts)
-} catch (_: OutOfMemoryError) {
-    null
-} catch (_: Exception) {
-    null
 }
 
 @Composable
