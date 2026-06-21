@@ -54,7 +54,7 @@ interface ReaderDao {
 
 @Database(
     entities = [BookEntity::class, ReadingLocatorEntity::class, ReaderSettingsEntity::class],
-    version = 2,
+    version = 3,
     exportSchema = false,
 )
 abstract class ReaderDatabase : RoomDatabase() {
@@ -65,11 +65,31 @@ abstract class ReaderDatabase : RoomDatabase() {
             context,
             ReaderDatabase::class.java,
             "reader.db",
-        ).addMigrations(MIGRATION_1_2).build()
+        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
 
-        private val MIGRATION_1_2 = object : Migration(1, 2) {
+        internal val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE settings ADD COLUMN ttsEngine TEXT NOT NULL DEFAULT 'SYSTEM'")
+            }
+        }
+
+        internal val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DELETE FROM locators WHERE bookId NOT IN (SELECT id FROM books)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS locators_new (" +
+                    "bookId TEXT NOT NULL PRIMARY KEY," +
+                    "chapterPath TEXT NOT NULL," +
+                    "paragraphIndex INTEGER NOT NULL," +
+                    "sentenceIndex INTEGER NOT NULL," +
+                    "characterOffset INTEGER NOT NULL," +
+                    "context TEXT NOT NULL," +
+                    "source TEXT NOT NULL," +
+                    "updatedAt INTEGER NOT NULL," +
+                    "FOREIGN KEY (bookId) REFERENCES books(id) ON DELETE CASCADE" +
+                    ")")
+                db.execSQL("INSERT INTO locators_new SELECT * FROM locators")
+                db.execSQL("DROP TABLE locators")
+                db.execSQL("ALTER TABLE locators_new RENAME TO locators")
             }
         }
     }

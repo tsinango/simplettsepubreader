@@ -58,7 +58,12 @@ class VitsModelManager(private val context: Context) {
 
     fun download() {
         val request = OneTimeWorkRequestBuilder<VitsModelDownloadWorker>()
-            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            .setConstraints(
+                Constraints.Builder()
+                    .setRequiredNetworkType(NetworkType.CONNECTED)
+                    .setRequiresStorageNotLow(true)
+                    .build(),
+            )
             .build()
         workManager.enqueueUniqueWork(WORK_NAME, ExistingWorkPolicy.KEEP, request)
     }
@@ -225,11 +230,20 @@ class VitsModelDownloadWorker(
                 partial.delete()
                 downloaded = 0L
             }
-            if (downloaded > 0 && responseCode == HttpURLConnection.HTTP_PARTIAL) {
-                val expectedRange = "bytes $downloaded-"
-                check(connection.getHeaderField("Content-Range")?.startsWith(expectedRange) == true) {
-                    "${spec.name} 断点响应范围不正确"
+            val contentLength = connection.contentLengthLong
+            val expectedTotal = if (responseCode == HttpURLConnection.HTTP_PARTIAL) {
+                val contentRange = connection.getHeaderField("Content-Range")
+                if (downloaded > 0) {
+                    check(contentRange?.startsWith("bytes $downloaded-") == true) {
+                        "${spec.name} 断点响应范围不正确"
+                    }
                 }
+                contentRange?.substringAfter('/')?.toLongOrNull() ?: spec.size
+            } else {
+                spec.size
+            }
+            if (expectedTotal != spec.size) {
+                error("${spec.name} 服务器返回的规格大小 $expectedTotal 与预期 $spec.size 不符")
             }
             connection.inputStream.use { input ->
                 FileOutputStream(partial, downloaded > 0).buffered().use { sink ->
@@ -239,8 +253,11 @@ class VitsModelDownloadWorker(
                         coroutineContext.ensureActive()
                         val count = input.read(buffer)
                         if (count < 0) break
-                        sink.write(buffer, 0, count)
                         current += count
+                        if (current > spec.size) {
+                            error("${spec.name} 下载数据超过规格大小 ${spec.size}")
+                        }
+                        sink.write(buffer, 0, count)
                         val percent = (((completedBefore + current) * 100) /
                             VitsModelManager.MODEL_SIZE_BYTES).toInt().coerceIn(0, 99)
                         setProgress(workDataOf(VitsModelManager.KEY_PROGRESS to percent))

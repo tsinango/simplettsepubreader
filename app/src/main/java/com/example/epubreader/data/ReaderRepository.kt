@@ -5,9 +5,11 @@ import android.net.Uri
 import com.example.epubreader.DiagnosticLogger
 import com.example.epubreader.epub.EpubParser
 import com.example.epubreader.epub.SentenceSplitter
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.security.MessageDigest
 import java.util.LinkedHashMap
@@ -28,19 +30,25 @@ class ReaderRepository(
     val locators: Flow<List<ReadingLocatorEntity>> = dao.locators()
     val settings: Flow<ReaderSettingsEntity?> = dao.settings()
 
-    suspend fun import(uri: Uri): BookEntity {
+    suspend fun import(uri: Uri): BookEntity = withContext(Dispatchers.IO) {
         val dir = File(context.filesDir, "books").apply { mkdirs() }
         val temp = File.createTempFile("import-", ".epub", dir)
         var importedFile: File? = null
         var keepImportedFile = false
         try {
             val digest = MessageDigest.getInstance("SHA-256")
+            var totalBytes = 0L
+            val maxFileBytes = MAX_EPUB_FILE_BYTES
             context.contentResolver.openInputStream(uri)?.use { input ->
                 temp.outputStream().use { output ->
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                     while (true) {
                         val read = input.read(buffer)
                         if (read < 0) break
+                        totalBytes += read
+                        if (totalBytes > maxFileBytes) {
+                            error("EPUB 文件过大（超过 ${maxFileBytes / (1024 * 1024)} MB）")
+                        }
                         digest.update(buffer, 0, read)
                         output.write(buffer, 0, read)
                     }
@@ -58,7 +66,7 @@ class ReaderRepository(
             val parsed = parser.parse(file)
             cacheParsed(id, parsed)
             val coverPath = saveCover(id, file, parsed.cover)
-            return BookEntity(
+            return@withContext BookEntity(
                 id = id,
                 title = parsed.title,
                 author = parsed.author,
@@ -77,15 +85,20 @@ class ReaderRepository(
 
     suspend fun book(id: String) = dao.book(id)
     suspend fun parsed(book: BookEntity): ParsedBook =
-        synchronized(cacheLock) { parsedCache[book.id] } ?: parser.parse(File(book.localPath)).also {
-            cacheParsed(book.id, it)
+        synchronized(cacheLock) { parsedCache[book.id] } ?: withContext(Dispatchers.IO) {
+            parser.parse(File(book.localPath)).also { cacheParsed(book.id, it) }
         }
 
     suspend fun locator(bookId: String) = dao.locator(bookId)
-    suspend fun deleteBook(bookId: String): BookEntity? {
-        val book = dao.book(bookId) ?: return null
+    suspend fun deleteBook(bookId: String): BookEntity? = withContext(Dispatchers.IO) {
+        val book = dao.book(bookId) ?: return@withContext null
         synchronized(cacheLock) {
             parsedCache.remove(bookId)
+            sentenceCache.entries.removeAll { it.key.startsWith("$bookId:") }
+            progressIndexCache.entries.removeAll { it.key.startsWith("$bookId:") }
+            if (lastSavedLocatorKey?.startsWith("$bookId:") == true) {
+                lastSavedLocatorKey = null
+            }
         }
         dao.deleteBookWithLocator(bookId)
         val epubFile = File(book.localPath)
@@ -93,9 +106,11 @@ class ReaderRepository(
             DiagnosticLogger.event("DELETE", "failed_to_delete_epub ${epubFile.name}")
         }
         book.coverPath?.let { path ->
-            runCatching { File(path).delete() }
+            runCatching { File(path).delete() }.onFailure {
+                DiagnosticLogger.event("DELETE", "failed_to_delete_cover $path")
+            }
         }
-        return book
+        return@withContext book
     }
 
     suspend fun saveSettings(value: ReaderSettingsEntity) = dao.saveSettings(value)
@@ -105,8 +120,9 @@ class ReaderRepository(
         sentence: SentenceRef,
         source: String,
     ) = progressMutex.withLock {
-        val locatorKey = "$bookId:${sentence.key()}"
+        val locatorKey = "$bookId:${sentence.chapterPath}:${sentence.paragraphIndex}:${sentence.sentenceIndex}"
         if (locatorKey == lastSavedLocatorKey) return@withLock
+        if (dao.book(bookId) == null) return@withLock
         val now = System.currentTimeMillis()
         val current = dao.locator(bookId)
         if (current == null || now >= current.updatedAt) {
@@ -127,14 +143,19 @@ class ReaderRepository(
     }
 
     suspend fun sentences(chapter: Chapter): List<SentenceRef> =
-        synchronized(cacheLock) { sentenceCache[sentenceCacheKey(chapter)] } ?: buildSentences(chapter).also {
-            synchronized(cacheLock) { sentenceCache[sentenceCacheKey(chapter)] = it }
+        withContext(Dispatchers.Default) {
+            val key = sentenceCacheKey(chapter)
+            synchronized(cacheLock) { sentenceCache[key] } ?: buildSentences(chapter).also {
+                synchronized(cacheLock) { sentenceCache[key] = it }
+            }
         }
 
-    fun cachedSentences(chapter: Chapter): List<SentenceRef> =
-        synchronized(cacheLock) { sentenceCache[sentenceCacheKey(chapter)] } ?: buildSentences(chapter).also {
-            synchronized(cacheLock) { sentenceCache[sentenceCacheKey(chapter)] = it }
+    fun cachedSentences(chapter: Chapter): List<SentenceRef> {
+        val key = sentenceCacheKey(chapter)
+        return synchronized(cacheLock) { sentenceCache[key] } ?: buildSentences(chapter).also {
+            synchronized(cacheLock) { sentenceCache[key] = it }
         }
+    }
 
     fun restore(chapter: Chapter, locator: ReadingLocatorEntity?): SentenceRef? {
         if (locator == null) return null
@@ -205,7 +226,7 @@ class ReaderRepository(
     }
 
     private fun progressIndexKey(parsed: ParsedBook): String =
-        "${parsed.title}:${parsed.author}:${parsed.chapters.size}:${parsed.chapters.hashCode()}"
+        "${parsed.title}:${parsed.author}:${parsed.chapters.size}:${parsed.chapters.joinToString(",") { it.path }}"
 
     private fun saveCover(bookId: String, bookFile: File, cover: BookCover?): String? {
         cover ?: return null
@@ -214,9 +235,27 @@ class ReaderRepository(
         val coverFile = File(coverDir, "$bookId.$extension")
         return runCatching {
             ZipFile(bookFile).use { zip ->
-                val entry = zip.getEntry(cover.path) ?: return null
+                val entry = zip.getEntry(cover.path) ?: return@runCatching null
+                if (entry.size > MAX_COVER_BYTES) {
+                    DiagnosticLogger.event("COVER", "too_large ${cover.path} size=${entry.size}")
+                    return@runCatching null
+                }
                 zip.getInputStream(entry).use { input ->
-                    coverFile.outputStream().use { output -> input.copyTo(output) }
+                    var total = 0L
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    coverFile.outputStream().use { output ->
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            total += read
+                            if (total > MAX_COVER_BYTES) {
+                                coverFile.delete()
+                                DiagnosticLogger.event("COVER", "exceeded_limit ${cover.path}")
+                                return@runCatching null
+                            }
+                            output.write(buffer, 0, read)
+                        }
+                    }
                 }
             }
             coverFile.absolutePath
@@ -248,13 +287,16 @@ class ReaderRepository(
     }
 
     private fun sentenceCacheKey(chapter: Chapter): String =
-        "${chapter.path}:${chapter.paragraphs.hashCode()}"
-
-    private fun SentenceRef.key() = "$chapterPath:$paragraphIndex:$sentenceIndex"
+        "${chapter.path}:${chapter.paragraphs.joinToString("|") { it.take(40) }}"
 
     private data class BookProgressIndex(
         val chapterCounts: List<Int>,
         val completedBeforeChapter: List<Int>,
         val total: Int,
     )
+
+    companion object {
+        private const val MAX_EPUB_FILE_BYTES = 200L * 1024 * 1024
+        private const val MAX_COVER_BYTES = 10L * 1024 * 1024
+    }
 }

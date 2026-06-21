@@ -56,7 +56,7 @@ class EmbeddedPlaybackPipelineTest {
         pipeline.enqueueAudio(floats(100), 22050, serial, "s:0:0", true)
         pipeline.closeChannel()
 
-        waitFor { allComplete || completed.isNotEmpty() || !pipeline.isPlaying }
+        waitFor { allComplete }
 
         assertEquals(listOf("s:0:0"), completed)
         assertTrue(allComplete)

@@ -50,6 +50,7 @@ class EmbeddedPlaybackPipeline(
     val totalWritten: Long get() = totalFramesWritten
     val isFloatSupported: Boolean get() = floatSupported
     val isPlaying: Boolean get() = playbackJob?.isActive == true
+    val isOwned: Boolean get() = playbackJob != null
 
     fun setFloatSupported(value: Boolean) {
         floatSupported = value
@@ -220,6 +221,7 @@ class EmbeddedPlaybackPipeline(
 
     private fun writeFloatLoop(sinkObj: AudioSink, samples: FloatArray, s: Int): Int {
         var offset = 0
+        var consecutiveZero = 0
         while (offset < samples.size && isCurrentSerial(s)) {
             val written = sinkObj.write(
                 samples, offset, samples.size - offset, AudioTrack.WRITE_BLOCKING,
@@ -231,7 +233,18 @@ class EmbeddedPlaybackPipeline(
                 )
                 return written
             }
-            if (written == 0) break
+            if (written == 0) {
+                consecutiveZero++
+                if (consecutiveZero >= MAX_CONSECUTIVE_ZERO) {
+                    DiagnosticLogger.event(
+                        "AUDIO_TRACK",
+                        "float_zero_limit serial=$s offset=$offset consecutiveZero=$consecutiveZero",
+                    )
+                    return 0
+                }
+                continue
+            }
+            consecutiveZero = 0
             offset += written
         }
         return offset
@@ -239,6 +252,7 @@ class EmbeddedPlaybackPipeline(
 
     private fun writePcm16Loop(sinkObj: AudioSink, samples: FloatArray, s: Int): Int {
         var offset = 0
+        var consecutiveZero = 0
         while (offset < samples.size && isCurrentSerial(s)) {
             val chunkSize = minOf(streamWriteFrames, samples.size - offset)
             val buf = ShortArray(chunkSize)
@@ -253,7 +267,18 @@ class EmbeddedPlaybackPipeline(
                 )
                 return written
             }
-            if (written == 0) break
+            if (written == 0) {
+                consecutiveZero++
+                if (consecutiveZero >= MAX_CONSECUTIVE_ZERO) {
+                    DiagnosticLogger.event(
+                        "AUDIO_TRACK",
+                        "pcm16_zero_limit serial=$s offset=$offset consecutiveZero=$consecutiveZero",
+                    )
+                    return 0
+                }
+                continue
+            }
+            consecutiveZero = 0
             offset += written
         }
         return offset
@@ -315,5 +340,9 @@ class EmbeddedPlaybackPipeline(
     private fun readPlayedFrames(): Long? {
         val s = sink ?: return null
         return s.playbackHeadPosition.toLong() and 0xffffffffL
+    }
+
+    companion object {
+        private const val MAX_CONSECUTIVE_ZERO = 5
     }
 }

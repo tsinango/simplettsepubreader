@@ -251,7 +251,15 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
             ACTION_NEXT -> scope.launch { commandMutex.withLock { move(1) } }
             ACTION_PREVIOUS -> scope.launch { commandMutex.withLock { move(-1) } }
             ACTION_SETTINGS_CHANGED -> scope.launch { commandMutex.withLock { reloadSettings() } }
-            ACTION_STOP -> scope.launch { commandMutex.withLock { stopPlayback() } }
+            ACTION_STOP -> {
+                val requestId = intent.getIntExtra(EXTRA_STOP_REQUEST_ID, 0)
+                scope.launch {
+                    commandMutex.withLock {
+                        stopPlayback()
+                        broadcastStopComplete(requestId)
+                    }
+                }
+            }
         }
         return START_NOT_STICKY
     }
@@ -688,6 +696,17 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         stopSelf()
     }
 
+    private fun broadcastStopComplete(requestId: Int) {
+        sendBroadcast(
+            Intent(ACTION_STATE_CHANGED)
+                .setPackage(packageName)
+                .putExtra(EXTRA_BOOK_ID, bookId)
+                .putExtra(EXTRA_STOP_COMPLETE, true)
+                .putExtra(EXTRA_STOP_REQUEST_ID, requestId)
+                .putExtra(EXTRA_PLAYING, false)
+        )
+    }
+
     private fun ensureAudioFocus(): Boolean {
         if (hasAudioFocus) return true
         hasAudioFocus = audioManager.requestAudioFocus(audioFocusRequest) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
@@ -804,16 +823,16 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
 
     override fun onDestroy() {
         DiagnosticLogger.event("TTS_SERVICE", "destroy")
+        playing = false
         stopCurrentAudio()
         releaseWakeLock()
+        abandonAudioFocus()
         tts?.shutdown()
+        tts = null
         powerManager.removeThermalStatusListener(thermalListener)
         recoveryJob?.cancel()
         engineRecreateJob?.cancel()
         scope.cancel()
-        // generate() is a blocking JNI call and cannot be cancelled while native code is active.
-        // Releasing OfflineTts concurrently can invalidate its native handle and terminate the
-        // process, so cleanup must acquire the same mutex used by every generation.
         NATIVE_CLEANUP_SCOPE.launch {
             synthesisMutex.withLock {
                 offlineTts?.runCatching { release() }
@@ -847,6 +866,8 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         const val EXTRA_PARAGRAPH_INDEX = "paragraphIndex"
         const val EXTRA_SENTENCE_INDEX = "sentenceIndex"
         const val EXTRA_ERROR = "error"
+        const val EXTRA_STOP_REQUEST_ID = "stopRequestId"
+        const val EXTRA_STOP_COMPLETE = "stopComplete"
         private const val CHANNEL_ID = "reader_tts"
         private const val NOTIFICATION_ID = 42
         private const val PLAYBACK_POLL_INTERVAL_MS = 20L

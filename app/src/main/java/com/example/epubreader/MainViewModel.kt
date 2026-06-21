@@ -23,17 +23,21 @@ import com.example.epubreader.tts.VitsModelState
 import com.example.epubreader.tts.VitsModelStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
 
 data class ReaderUiState(
     val book: BookEntity? = null,
@@ -62,12 +66,19 @@ data class ReaderPositionState(
     val isSpeaking: Boolean = false,
 )
 
+data class LibraryUiState(
+    val books: List<BookEntity> = emptyList(),
+    val bookProgress: Map<String, Float> = emptyMap(),
+    val deletingBookIds: Set<String> = emptySet(),
+    val loadingImport: Boolean = false,
+    val deleteResult: String? = null,
+)
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = (application as ReaderApplication).repository
     private val vitsModelManager = VitsModelManager(application)
     private val ttsPerformanceStore = TtsPerformanceStore(application)
 
-    val books = repository.books.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val settings = repository.settings.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5000),
@@ -87,20 +98,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _readerPosition = MutableStateFlow(ReaderPositionState())
     val readerPosition: StateFlow<ReaderPositionState> = _readerPosition
 
-    private val _bookProgress = MutableStateFlow<Map<String, Float>>(emptyMap())
-    val bookProgress: StateFlow<Map<String, Float>> = _bookProgress
+    private val _library = MutableStateFlow(LibraryUiState())
+    val library: StateFlow<LibraryUiState> = _library
 
-    private val _deleteResult = MutableStateFlow<String?>(null)
-    val deleteResult: StateFlow<String?> = _deleteResult
-
-    private val deletingBookIds = mutableSetOf<String>()
+    private var currentBookId: String? = null
+    private var openToken = 0
+    private var importToken = 0
+    private var stopRequestId = 0
     private var sleepTimerJob: Job? = null
+
     private val ttsStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != ReaderTtsService.ACTION_STATE_CHANGED) return
+            if (intent.getBooleanExtra(ReaderTtsService.EXTRA_STOP_COMPLETE, false)) {
+                val receivedId = intent.getIntExtra(ReaderTtsService.EXTRA_STOP_REQUEST_ID, -1)
+                stopCompleteDeferred?.let { d ->
+                    if (receivedId == d.first) {
+                        d.second.complete(Unit)
+                    }
+                }
+            }
             applyTtsState(intent)
         }
     }
+    private var stopCompleteDeferred: Pair<Int, kotlinx.coroutines.CompletableDeferred<Unit>>? = null
 
     init {
         val filter = IntentFilter(ReaderTtsService.ACTION_STATE_CHANGED)
@@ -112,7 +133,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
 
         viewModelScope.launch {
-            books.collect { refreshLibraryProgress(it) }
+            repository.books.collectLatest { books ->
+                val progressMap = mutableMapOf<String, Float>()
+                books.forEach { book ->
+                    runCatching {
+                        val parsed = withContext(Dispatchers.Default) { repository.parsed(book) }
+                        val locator = repository.locator(book.id)
+                        repository.progressPercent(parsed, locator)
+                    }.onSuccess { p -> progressMap[book.id] = p }
+                }
+                _library.value = _library.value.copy(
+                    books = books,
+                    bookProgress = progressMap,
+                )
+            }
         }
         viewModelScope.launch {
             vitsModelState.collect { state ->
@@ -121,7 +155,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 ) {
                     vitsModelManager.clearSwitchAfterDownload()
                     val value = settings.value ?: ReaderSettingsEntity()
-                    updateSettings(value.copy(ttsEngine = TTS_ENGINE_VITS))
+                    repository.saveSettings(value.copy(ttsEngine = TTS_ENGINE_VITS))
                 }
             }
         }
@@ -130,80 +164,117 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope.launch {
                 val current = repository.settings.first()
                 if (current?.ttsEngine == TTS_ENGINE_VITS) {
-                    updateSettings(current.copy(ttsEngine = TTS_ENGINE_SYSTEM))
+                    repository.saveSettings(current.copy(ttsEngine = TTS_ENGINE_SYSTEM))
                     DiagnosticLogger.event("TTS_FALLBACK", "auto_switch_to_system_after_native_crash")
                 }
             }
         }
     }
 
-    fun import(uri: Uri) = viewModelScope.launch {
-        _reader.value = _reader.value.copy(loading = true, error = null)
-        runCatching { repository.import(uri) }
-            .onSuccess { open(it.id) }
-            .onFailure { _reader.value = ReaderUiState(error = it.message ?: "导入失败") }
+    fun import(uri: Uri) {
+        val token = ++importToken
+        _library.value = _library.value.copy(loadingImport = true)
+        viewModelScope.launch {
+            runCatching { repository.import(uri) }
+                .onSuccess {
+                    if (token == importToken) {
+                        _library.value = _library.value.copy(loadingImport = false)
+                        open(it.id)
+                    }
+                }
+                .onFailure {
+                    if (token == importToken) {
+                        _library.value = _library.value.copy(loadingImport = false)
+                        _reader.value = ReaderUiState(error = it.message ?: "导入失败")
+                    }
+                }
+        }
+    }
+
+    fun deleteBook(bookId: String) {
+        val current = _library.value
+        if (bookId in current.deletingBookIds) return
+        _library.value = current.copy(deletingBookIds = current.deletingBookIds + bookId)
+        viewModelScope.launch {
+            try {
+                val currentBookId = _reader.value.book?.id
+                if (bookId == currentBookId) {
+                    val requestId = ++stopRequestId
+                    val deferred = kotlinx.coroutines.CompletableDeferred<Unit>()
+                    stopCompleteDeferred = requestId to deferred
+                    sendAction(ReaderTtsService.ACTION_STOP, requestId)
+                    try {
+                        kotlinx.coroutines.withTimeout(5_000L) { deferred.await() }
+                    } catch (_: TimeoutCancellationException) {
+                        stopCompleteDeferred = null
+                        _library.value = _library.value.copy(
+                            deleteResult = "TTS 停止超时，请稍后重试",
+                        )
+                        return@launch
+                    } finally {
+                        if (stopCompleteDeferred?.first == requestId) {
+                            stopCompleteDeferred = null
+                        }
+                    }
+                    _reader.value = ReaderUiState()
+                    _readerPosition.value = ReaderPositionState()
+                    this@MainViewModel.currentBookId = null
+                }
+                repository.deleteBook(bookId)
+                _library.value = _library.value.copy(
+                    deleteResult = "删除成功",
+                )
+            } catch (e: Throwable) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                _library.value = _library.value.copy(
+                    deleteResult = e.message ?: "删除失败",
+                )
+            } finally {
+                _library.value = _library.value.copy(
+                    deletingBookIds = _library.value.deletingBookIds - bookId,
+                )
+            }
+        }
     }
 
     fun clearDeleteResult() {
-        _deleteResult.value = null
-    }
-
-    fun deleteBook(bookId: String) = viewModelScope.launch {
-        if (!deletingBookIds.add(bookId)) return@launch
-        try {
-            val currentBookId = _reader.value.book?.id
-            if (bookId == currentBookId) {
-                sendAction(ReaderTtsService.ACTION_STOP)
-                try {
-                    withTimeout(5_000L) {
-                        _readerPosition
-                            .filter { !it.isSpeaking }
-                            .first()
-                    }
-                } catch (_: TimeoutCancellationException) {
-                    // Expected if TTS stop takes too long — proceed
-                }
-                _reader.value = ReaderUiState()
-                _readerPosition.value = ReaderPositionState()
-            }
-            withContext(Dispatchers.IO) {
-                repository.deleteBook(bookId)
-            }
-        } catch (e: Throwable) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            _deleteResult.value = e.message ?: "删除失败"
-        } finally {
-            deletingBookIds.remove(bookId)
-        }
+        _library.value = _library.value.copy(deleteResult = null)
     }
 
     fun clearError() {
         _reader.value = _reader.value.copy(error = null)
     }
 
-    fun open(bookId: String) = viewModelScope.launch {
+    fun open(bookId: String) {
+        val token = ++openToken
+        currentBookId = bookId
         _reader.value = ReaderUiState(loading = true)
         _readerPosition.value = ReaderPositionState(bookId = bookId)
-        runCatching {
-            val book = requireNotNull(repository.book(bookId))
-            val parsed = repository.parsed(book)
-            val locator = repository.locator(bookId)
-            val chapterIndex = parsed.chapters.indexOfFirst { it.path == locator?.chapterPath }
-                .coerceAtLeast(0)
-            val chapter = parsed.chapters[chapterIndex]
-            val restored = repository.restore(chapter, locator)
-            val sentences = repository.sentences(chapter)
-            val sentenceIndex = sentences.indexOf(restored).coerceAtLeast(0)
-            val progress = progressForPosition(parsed, chapterIndex, sentenceIndex)
-            ReaderUiState(book, parsed, chapterIndex, sentenceIndex, sentences, progress = progress)
-                .withAdjacentChapters()
-        }.onSuccess {
-            _reader.value = it
-            _readerPosition.value = it.toPositionState()
-            updateBookProgressFromReader(it)
-        }.onFailure {
-            _reader.value = ReaderUiState(error = it.message ?: "打开失败")
-            _readerPosition.value = ReaderPositionState()
+        viewModelScope.launch {
+            if (token != openToken) return@launch
+            runCatching {
+                val book = repository.book(bookId) ?: error("书籍未找到")
+                val parsed = withContext(Dispatchers.Default) { repository.parsed(book) }
+                val locator = repository.locator(bookId)
+                val chapterIndex = parsed.chapters.indexOfFirst { it.path == locator?.chapterPath }
+                    .coerceAtLeast(0)
+                val chapter = parsed.chapters[chapterIndex]
+                val restored = repository.restore(chapter, locator)
+                val sentences = repository.sentences(chapter)
+                val sentenceIndex = sentences.indexOf(restored).coerceAtLeast(0)
+                val progress = repository.progressPercent(parsed, chapterIndex, sentenceIndex)
+                ReaderUiState(book, parsed, chapterIndex, sentenceIndex, sentences, progress = progress)
+                    .withAdjacentChapters()
+            }.onSuccess { state ->
+                if (token != openToken) return@launch
+                _reader.value = state
+                _readerPosition.value = state.toPositionState()
+            }.onFailure {
+                if (token != openToken) return@launch
+                _reader.value = ReaderUiState(error = it.message ?: "打开失败")
+                _readerPosition.value = ReaderPositionState()
+                currentBookId = null
+            }
         }
     }
 
@@ -212,7 +283,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val parsed = state.parsed ?: return@launch
         val chapter = parsed.chapters.getOrNull(index) ?: return@launch
         val sentences = repository.sentences(chapter)
-        val progress = progressForPosition(parsed, index, 0)
+        val progress = repository.progressPercent(parsed, index, 0)
         val next = state.copy(
             chapterIndex = index,
             sentenceIndex = 0,
@@ -221,7 +292,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ).withAdjacentChapters()
         _reader.value = next
         _readerPosition.value = next.toPositionState()
-        updateBookProgressFromReader(next)
         persistCurrent("UI")
     }
 
@@ -231,14 +301,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (position.isSpeaking || index == position.sentenceIndex || state.sentences.isEmpty()) return
         val nextIndex = index.coerceIn(state.sentences.indices)
         val parsed = state.parsed ?: return
-        val progress = progressForPosition(parsed, state.chapterIndex, nextIndex)
+        val progress = repository.progressPercent(parsed, state.chapterIndex, nextIndex)
         val next = position.copy(
             chapterIndex = state.chapterIndex,
             sentenceIndex = nextIndex,
             progress = progress,
         )
         _readerPosition.value = next
-        updateBookProgressFromPosition(next)
         persistCurrent("UI")
     }
 
@@ -249,14 +318,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val nextIndex = index.coerceIn(state.sentences.indices)
         if (nextIndex == position.sentenceIndex && state.chapterIndex == position.chapterIndex) return
         val parsed = state.parsed ?: return
-        val progress = progressForPosition(parsed, state.chapterIndex, nextIndex)
+        val progress = repository.progressPercent(parsed, state.chapterIndex, nextIndex)
         val next = position.copy(
             chapterIndex = state.chapterIndex,
             sentenceIndex = nextIndex,
             progress = progress,
         )
         _readerPosition.value = next
-        updateBookProgressFromPosition(next)
         persistCurrent("UI")
     }
 
@@ -282,7 +350,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             visibleSentenceInCurrentChapter(sentenceIndex)
             return
         }
-        val progress = progressForPosition(parsed, chapterIndex, sentenceIndex)
+        val progress = repository.progressPercent(parsed, chapterIndex, sentenceIndex)
         _reader.value = state.copy(
             chapterIndex = chapterIndex,
             sentenceIndex = sentenceIndex,
@@ -295,7 +363,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             progress = progress,
         )
         _readerPosition.value = nextPosition
-        updateBookProgressFromPosition(nextPosition)
         persistCurrent("UI")
     }
 
@@ -311,7 +378,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (position.chapterIndex != state.chapterIndex) return
         val sentence = state.sentences.getOrNull(position.sentenceIndex) ?: return
         repository.saveProgress(bookId, sentence, source)
-        val progress = progressForPosition(parsed, position.chapterIndex, position.sentenceIndex)
+        val progress = repository.progressPercent(parsed, position.chapterIndex, position.sentenceIndex)
         val currentPosition = _readerPosition.value
         if (_reader.value.book?.id != bookId ||
             currentPosition.chapterIndex != position.chapterIndex ||
@@ -322,7 +389,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val next = _reader.value.copy(progress = progress)
         _reader.value = next
         _readerPosition.value = currentPosition.copy(progress = progress)
-        updateBookProgressFromReader(next)
     }
 
     fun updateSettings(value: ReaderSettingsEntity) = viewModelScope.launch {
@@ -404,7 +470,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_readerPosition.value.isSpeaking || direction == 0) return@launch
         val move = findReadableChapter(state, direction.sign()) ?: return@launch
         val sentenceIndex = if (direction > 0) 0 else move.sentences.lastIndex
-        val progress = state.parsed?.let { progressForPosition(it, move.chapterIndex, sentenceIndex) } ?: state.progress
+        val progress = state.parsed?.let { repository.progressPercent(it, move.chapterIndex, sentenceIndex) } ?: state.progress
         val next = state.copy(
             chapterIndex = move.chapterIndex,
             sentenceIndex = sentenceIndex,
@@ -413,7 +479,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ).withAdjacentChapters()
         _reader.value = next
         _readerPosition.value = next.toPositionState()
-        updateBookProgressFromReader(next)
         persistCurrent("UI")
     }
 
@@ -451,10 +516,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    private fun sendAction(actionName: String) {
+    private fun sendAction(actionName: String, requestId: Int? = null) {
         val intent = Intent(getApplication(), ReaderTtsService::class.java)
             .setAction(actionName)
             .putExtra(ReaderTtsService.EXTRA_BOOK_ID, _reader.value.book?.id)
+        if (requestId != null) {
+            intent.putExtra(ReaderTtsService.EXTRA_STOP_REQUEST_ID, requestId)
+        }
         getApplication<Application>().startService(intent)
     }
 
@@ -472,7 +540,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         val move = findReadableChapter(state, delta.sign()) ?: return@launch
         val sentenceIndex = if (delta > 0) 0 else move.sentences.lastIndex
-        val progress = progressForPosition(parsed, move.chapterIndex, sentenceIndex)
+        val progress = repository.progressPercent(parsed, move.chapterIndex, sentenceIndex)
         _reader.value = state.copy(
             chapterIndex = move.chapterIndex,
             sentenceIndex = sentenceIndex,
@@ -480,7 +548,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             progress = progress,
         ).withAdjacentChapters()
         _readerPosition.value = _reader.value.toPositionState()
-        updateBookProgressFromPosition(_readerPosition.value)
         persistCurrent("UI")
     }
 
@@ -580,7 +647,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _readerPosition.value = position.copy(isSpeaking = playing)
             return
         }
-        val progress = progressForPosition(parsed, chapterIndex, localSentenceIndex)
+        val progress = repository.progressPercent(parsed, chapterIndex, localSentenceIndex)
         val nextPosition = position.copy(
             bookId = currentBookId,
             chapterIndex = chapterIndex,
@@ -593,7 +660,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (state.isSpeaking != playing) {
                 _reader.value = state.copy(isSpeaking = playing)
             }
-            updateBookProgressFromPosition(nextPosition)
             return
         }
         _reader.value = state.copy(
@@ -604,7 +670,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             progress = progress,
         ).withAdjacentChapters()
         _readerPosition.value = nextPosition
-        updateBookProgressFromPosition(nextPosition)
     }
 
     private fun ReaderUiState.withAdjacentChapters(): ReaderUiState {
@@ -636,41 +701,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private suspend fun refreshLibraryProgress(items: List<BookEntity>) {
-        val progressMap = mutableMapOf<String, Float>()
-        items.forEach { book ->
-            runCatching {
-                val parsed = repository.parsed(book)
-                val locator = repository.locator(book.id)
-                progressForLocator(parsed, locator)
-            }.onSuccess { progress ->
-                progressMap[book.id] = progress
-            }
-        }
-        _bookProgress.value = progressMap
-    }
-
-    private fun updateReaderProgress() = viewModelScope.launch {
-        val state = _reader.value
-        val position = _readerPosition.value
-        val parsed = state.parsed ?: return@launch
-        if (state.sentences.getOrNull(position.sentenceIndex) == null) return@launch
-        val progress = progressForPosition(parsed, position.chapterIndex, position.sentenceIndex)
-        val next = position.copy(progress = progress)
-        _readerPosition.value = next
-        updateBookProgressFromPosition(next)
-    }
-
-    private fun updateBookProgressFromReader(state: ReaderUiState) {
-        val id = state.book?.id ?: return
-        _bookProgress.value = _bookProgress.value + (id to state.progress)
-    }
-
-    private fun updateBookProgressFromPosition(position: ReaderPositionState) {
-        val id = position.bookId ?: return
-        _bookProgress.value = _bookProgress.value + (id to position.progress)
-    }
-
     private fun ReaderUiState.toPositionState(): ReaderPositionState =
         ReaderPositionState(
             bookId = book?.id,
@@ -679,19 +709,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             progress = progress,
             isSpeaking = isSpeaking,
         )
-
-    private fun progressForPosition(
-        parsed: ParsedBook,
-        chapterIndex: Int,
-        sentenceIndex: Int,
-    ): Float =
-        repository.progressPercent(parsed, chapterIndex, sentenceIndex)
-
-    private suspend fun progressForLocator(
-        parsed: ParsedBook,
-        locator: ReadingLocatorEntity?,
-    ): Float =
-        repository.progressPercent(parsed, locator)
 
     fun currentChapter(): Chapter? = _reader.value.parsed?.chapters?.getOrNull(_reader.value.chapterIndex)
 
