@@ -26,11 +26,9 @@ import com.example.epubreader.data.ReaderRepository
 import com.example.epubreader.data.ReadingLocatorEntity
 import com.example.epubreader.data.SentenceRef
 import com.example.epubreader.MainViewModel
-import com.k2fsa.sherpa.onnx.GenerationConfig
-import com.k2fsa.sherpa.onnx.OfflineTts
-import com.k2fsa.sherpa.onnx.OfflineTtsConfig
-import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
-import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig
+import com.example.epubreader.tts.engine.EmbeddedTtsEngine
+import com.example.epubreader.tts.engine.EngineSwitchGate
+import com.example.epubreader.tts.engine.SherpaVitsEngine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -43,7 +41,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import java.io.File
 import java.util.Locale
 
 class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
@@ -65,8 +62,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private var currentUtteranceId: String? = null
     @Volatile private var activeEngine = MainViewModel.TTS_ENGINE_SYSTEM
     @Volatile private var activeVitsDescriptor: VitsModelDescriptor = VitsModelRegistry.WNJ
-    @Volatile private var currentBuiltModelId: VitsModelId? = null
-    private var offlineTts: OfflineTts? = null
+    private val engineGate = EngineSwitchGate()
     private lateinit var pipeline: EmbeddedPlaybackPipeline
     private var generationJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -142,9 +138,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         scope.launch(Dispatchers.Default) {
             synthesisMutex.withLock {
                 val startedAt = SystemClock.elapsedRealtime()
-                offlineTts?.runCatching { release() }
-                offlineTts = null
-                currentBuiltModelId = null
+                engineGate.release()
                 val releaseMs = (SystemClock.elapsedRealtime() - startedAt)
                 DiagnosticLogger.event("VITS_ENGINE", "recreate $reason releaseMs=$releaseMs")
             }
@@ -180,9 +174,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
             pipeline.stopPlayback()
             synthesisMutex.withLock {
                 val startedAt = SystemClock.elapsedRealtime()
-                offlineTts?.runCatching { release() }
-                offlineTts = null
-                currentBuiltModelId = null
+                engineGate.release()
                 val releaseMs = (SystemClock.elapsedRealtime() - startedAt)
                 DiagnosticLogger.event(
                     "VITS_ENGINE",
@@ -431,7 +423,8 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
 
     private fun speakEmbedded(sentence: SentenceRef) {
         val descriptor = activeVitsDescriptor
-        if (!VitsModelManager.isReady(this, descriptor)) {
+        val candidate = engineGate.candidate(descriptor, descriptor.id.stableValue, ::createEmbeddedEngine)
+        if (!candidate.isAvailable(this)) {
             DiagnosticLogger.event("VITS", "model_not_ready model=${descriptor.id.stableValue}")
             scope.launch { fallbackToSystem("内置语音模型不可用，已切换到系统 TTS") }
             return
@@ -485,7 +478,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     ): SynthesizedAudio? =
         synthesisMutex.withLock {
             if (!isGenerationCurrent(serial)) return@withLock null
-            val engine = withContext(Dispatchers.Default) { embeddedTts() }
+            val engine = withContext(Dispatchers.Default) { ensureEngine() }
             val startedAt = SystemClock.elapsedRealtime()
             val engineSpeed = vitsEngineSpeed(speechRate)
             DiagnosticLogger.event(
@@ -493,16 +486,8 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                 "start serial=$serial chunk=${chunk.index} length=${chunk.text.length} " +
                     "rate=$speechRate engineSpeed=$engineSpeed",
             )
-            val genConfig = GenerationConfig(
-                silenceScale = 0.2f,
-                speed = engineSpeed,
-                sid = 0,
-            )
             val generated = withContext(Dispatchers.Default) {
-                engine.generateWithConfig(
-                    chunk.text,
-                    genConfig,
-                )
+                engine.synthesize(chunk.text, sid = 0, speed = engineSpeed)
             }
             if (!isGenerationCurrent(serial) || generated.samples.isEmpty()) return@withLock null
             val silenceSamples = chunk.pauseMs * generated.sampleRate / 1000
@@ -531,53 +516,27 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private fun isGenerationCurrent(serial: Int): Boolean =
         playing && activeEngine == MainViewModel.TTS_ENGINE_VITS && serial == embeddedGenerationSerial
 
-    private fun embeddedTts(): OfflineTts {
+    private fun ensureEngine(): EmbeddedTtsEngine {
         val descriptor = activeVitsDescriptor
-        val existing = offlineTts
-        if (existing != null && currentBuiltModelId == descriptor.id) return existing
-        val startedAt = SystemClock.elapsedRealtime()
-        existing?.runCatching { release() }
-        offlineTts = null
-        currentBuiltModelId = descriptor.id
+        val engine = engineGate.candidate(descriptor, descriptor.id.stableValue, ::createEmbeddedEngine)
+        if (engineGate.isBuilt(engine)) return engine
         val numThreads = engineThreads
-        val modelDir = VitsModelManager.modelDir(this, descriptor)
-        val fstPaths = descriptor.ruleFstFileNames.joinToString(",") { name ->
-            File(modelDir, name).absolutePath
-        }
-        val modelPath = File(modelDir, descriptor.onnxFileName).absolutePath
-        val tokensPath = File(modelDir, descriptor.tokensFileName).absolutePath
-        val lexiconPath = File(modelDir, descriptor.lexiconFileName).absolutePath
-        val created = OfflineTts(
-            config = OfflineTtsConfig(
-                model = OfflineTtsModelConfig(
-                    vits = OfflineTtsVitsModelConfig(
-                        model = modelPath,
-                        tokens = tokensPath,
-                        lexicon = lexiconPath,
-                    ),
-                    numThreads = numThreads,
-                ),
-                ruleFsts = fstPaths,
-                maxNumSentences = 1,
-                silenceScale = 0.2f,
-            ),
-        )
+        val startedAt = SystemClock.elapsedRealtime()
+        engine.initialize(this, numThreads)
         lastEngineInitMillis = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(1)
-        offlineTts = created
+        engineGate.markBuilt(engine)
         if (lastFirstAudioMillis == 0L && playbackRequestedAt > 0L) {
             lastFirstAudioMillis = (SystemClock.elapsedRealtime() - playbackRequestedAt).coerceAtLeast(0)
         }
         DiagnosticLogger.event(
             "VITS_ENGINE",
-            "created model=${descriptor.id.stableValue} initMs=$lastEngineInitMillis threads=$numThreads " +
-                "ruleFsts=${descriptor.ruleFstFileNames.joinToString(",")} maxNumSentences=1 silenceScale=0.2 " +
-                "modelReady=${VitsModelManager.isReady(this, descriptor)} " +
-                "modelBytes=${File(modelDir, descriptor.onnxFileName).length()} " +
-                "tokensBytes=${File(modelDir, descriptor.tokensFileName).length()} " +
-                "lexiconBytes=${File(modelDir, descriptor.lexiconFileName).length()}",
+            "ready model=${descriptor.id.stableValue} initMs=$lastEngineInitMillis threads=$numThreads",
         )
-        return created
+        return engine
     }
+
+    private fun createEmbeddedEngine(descriptor: VitsModelDescriptor): EmbeddedTtsEngine =
+        SherpaVitsEngine(descriptor)
 
     private suspend fun handleSentenceComplete(key: String) {
         if (!playing) return
@@ -860,11 +819,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         scope.cancel()
         NATIVE_CLEANUP_SCOPE.launch {
             synthesisMutex.withLock {
-                offlineTts?.runCatching { release() }
-                    ?.onSuccess { DiagnosticLogger.event("VITS_ENGINE", "released") }
-                    ?.onFailure { DiagnosticLogger.error("VITS_ENGINE", "release_failed", it) }
-                offlineTts = null
-                currentBuiltModelId = null
+                engineGate.release()
             }
         }
         super.onDestroy()
