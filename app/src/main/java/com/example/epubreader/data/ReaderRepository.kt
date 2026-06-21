@@ -94,8 +94,11 @@ class ReaderRepository(
         val book = dao.book(bookId) ?: return@withContext null
         synchronized(cacheLock) {
             parsedCache.remove(bookId)
-            sentenceCache.entries.removeAll { it.key.startsWith("$bookId:") }
-            progressIndexCache.entries.removeAll { it.key.startsWith("$bookId:") }
+            // sentenceCache and progressIndexCache are keyed by chapter content / book metadata
+            // (not bookId), so prefix matching never hits. Clear them outright; both are small
+            // LRU caches that rebuild cheaply on next access.
+            sentenceCache.clear()
+            progressIndexCache.clear()
             if (lastSavedLocatorKey?.startsWith("$bookId:") == true) {
                 lastSavedLocatorKey = null
             }

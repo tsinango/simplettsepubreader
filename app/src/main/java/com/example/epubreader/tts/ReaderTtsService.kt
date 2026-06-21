@@ -564,7 +564,9 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     }
 
     private suspend fun handleSentenceComplete(key: String) {
+        if (!playing) return
         withContext(Dispatchers.Main) {
+            if (!playing) return@withContext
             val idx = chapterSentences.indexOfFirst { it.key() == key }
             if (idx >= 0) {
                 sentenceIndex = idx + 1
@@ -583,7 +585,9 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     }
 
     private suspend fun handleAllPlaybackComplete() {
+        if (!playing) return
         withContext(Dispatchers.Main) {
+            if (!playing) return@withContext
             if (moveIndex(1)) speakCurrent() else stopPlayback()
         }
     }
@@ -685,10 +689,14 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         return true
     }
 
-    private fun stopPlayback() {
+    private suspend fun stopPlayback() {
         DiagnosticLogger.event("TTS_PLAY", "stop")
         playing = false
+        val genJob = generationJob
+        val playJob = pipeline.activePlaybackJob
         stopCurrentAudio()
+        genJob?.join()
+        playJob?.join()
         releaseWakeLock()
         abandonAudioFocus()
         broadcastState()

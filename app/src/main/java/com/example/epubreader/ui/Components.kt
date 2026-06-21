@@ -17,7 +17,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -28,6 +29,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.epubreader.R
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private const val COVER_TARGET_WIDTH = 144
 private const val COVER_TARGET_HEIGHT = 216
@@ -35,8 +38,9 @@ private const val COVER_TARGET_HEIGHT = 216
 @Composable
 fun BookCover(title: String, coverPath: String?) {
     val context = LocalContext.current
-    val bitmap = remember(coverPath) {
-        coverPath?.let { decodeCoverSampled(it) }
+    val bitmap by produceState<Bitmap?>(initialValue = null, coverPath) {
+        value = if (coverPath == null) null
+        else withContext(Dispatchers.IO) { decodeCoverSampled(coverPath) }
     }
     Box(
         modifier = Modifier
@@ -47,8 +51,9 @@ fun BookCover(title: String, coverPath: String?) {
         contentAlignment = Alignment.Center,
     ) {
         if (bitmap != null) {
+            val bmp = bitmap!!
             Image(
-                bitmap = bitmap.asImageBitmap(),
+                bitmap = bmp.asImageBitmap(),
                 contentDescription = context.getString(R.string.cover_label, title),
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop,

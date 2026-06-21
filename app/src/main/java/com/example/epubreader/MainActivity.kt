@@ -15,6 +15,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -43,7 +44,7 @@ private fun ReaderApp(vm: MainViewModel = viewModel()) {
     val position by vm.readerPosition.collectAsStateWithLifecycle()
     val vitsModelState by vm.vitsModelState.collectAsStateWithLifecycle()
     val ttsPerformance by vm.ttsPerformance.collectAsStateWithLifecycle()
-    var currentBookId by remember { mutableStateOf<String?>(null) }
+    var currentBookId by rememberSaveable { mutableStateOf<String?>(null) }
     val theme = settings?.theme ?: "SYSTEM"
     val dark = theme == "DARK" || (theme == "SYSTEM" && isSystemInDarkTheme())
 

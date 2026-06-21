@@ -90,6 +90,7 @@ abstract class ReaderDatabase : RoomDatabase() {
                 db.execSQL("INSERT INTO locators_new SELECT * FROM locators")
                 db.execSQL("DROP TABLE locators")
                 db.execSQL("ALTER TABLE locators_new RENAME TO locators")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_locators_bookId ON locators(bookId)")
             }
         }
     }

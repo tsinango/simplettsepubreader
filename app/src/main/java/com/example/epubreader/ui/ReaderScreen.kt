@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -95,11 +96,9 @@ fun ReaderScreen(
     val currentItemIndex = remember(readingItems, position.chapterIndex, position.sentenceIndex) {
         readingItems.currentSentenceItemIndex(position)
     }
-    val listState = remember(state.book?.id) {
-        LazyListState(
-            firstVisibleItemIndex = if (currentItemIndex < 0) 0 else currentItemIndex,
-        )
-    }
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = if (currentItemIndex < 0) 0 else currentItemIndex,
+    )
     var showContents by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var showSleepTimer by remember { mutableStateOf(false) }
@@ -139,9 +138,9 @@ fun ReaderScreen(
     val window = context.findActivity()?.window
     val chapters = state.parsed?.chapters.orEmpty()
     val currentChapterIndex = position.chapterIndex.coerceIn(chapters.indicesOrZero())
-    val contentsListState = remember(state.book?.id) {
-        LazyListState(firstVisibleItemIndex = currentChapterIndex)
-    }
+    val contentsListState = rememberLazyListState(
+        initialFirstVisibleItemIndex = currentChapterIndex,
+    )
 
     DisposableEffect(lifecycle) {
         val observer = LifecycleEventObserver { _, event ->

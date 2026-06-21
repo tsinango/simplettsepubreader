@@ -51,6 +51,7 @@ class EmbeddedPlaybackPipeline(
     val isFloatSupported: Boolean get() = floatSupported
     val isPlaying: Boolean get() = playbackJob?.isActive == true
     val isOwned: Boolean get() = playbackJob != null
+    val activePlaybackJob: Job? get() = playbackJob
 
     fun setFloatSupported(value: Boolean) {
         floatSupported = value
