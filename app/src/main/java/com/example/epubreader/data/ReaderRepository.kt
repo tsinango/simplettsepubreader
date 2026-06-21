@@ -2,6 +2,7 @@ package com.example.epubreader.data
 
 import android.content.Context
 import android.net.Uri
+import com.example.epubreader.DiagnosticLogger
 import com.example.epubreader.epub.EpubParser
 import com.example.epubreader.epub.SentenceSplitter
 import kotlinx.coroutines.flow.Flow
@@ -86,15 +87,13 @@ class ReaderRepository(
         synchronized(cacheLock) {
             parsedCache.remove(bookId)
         }
-        dao.deleteLocator(bookId)
-        dao.deleteBook(bookId)
+        dao.deleteBookWithLocator(bookId)
         val epubFile = File(book.localPath)
         if (epubFile.exists() && !epubFile.delete()) {
-            error("无法删除本地文件 ${epubFile.name}")
+            DiagnosticLogger.event("DELETE", "failed_to_delete_epub ${epubFile.name}")
         }
         book.coverPath?.let { path ->
-            val coverFile = File(path)
-            if (coverFile.exists()) coverFile.delete()
+            runCatching { File(path).delete() }
         }
         return book
     }

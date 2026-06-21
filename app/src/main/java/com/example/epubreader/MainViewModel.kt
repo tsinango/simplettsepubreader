@@ -153,17 +153,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         try {
             val currentBookId = _reader.value.book?.id
             if (bookId == currentBookId) {
-                if (_readerPosition.value.isSpeaking) {
-                    sendAction(ReaderTtsService.ACTION_STOP)
-                    try {
-                        withTimeout(3_000L) {
-                            _readerPosition
-                                .filter { !it.isSpeaking }
-                                .first()
-                        }
-                    } catch (_: TimeoutCancellationException) {
-                        // Expected if TTS stop takes too long — proceed
+                sendAction(ReaderTtsService.ACTION_STOP)
+                try {
+                    withTimeout(5_000L) {
+                        _readerPosition
+                            .filter { !it.isSpeaking }
+                            .first()
                     }
+                } catch (_: TimeoutCancellationException) {
+                    // Expected if TTS stop takes too long — proceed
                 }
                 _reader.value = ReaderUiState()
                 _readerPosition.value = ReaderPositionState()

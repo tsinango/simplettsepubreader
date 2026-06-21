@@ -7,6 +7,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Room
+import androidx.room.Transaction
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
@@ -43,6 +44,12 @@ interface ReaderDao {
 
     @Query("DELETE FROM locators WHERE bookId = :bookId")
     suspend fun deleteLocator(bookId: String)
+
+    @Transaction
+    suspend fun deleteBookWithLocator(bookId: String) {
+        deleteLocator(bookId)
+        deleteBook(bookId)
+    }
 }
 
 @Database(
