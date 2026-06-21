@@ -50,6 +50,7 @@ data class ReaderSettingsEntity(
     val pitch: Float = 1f,
     val voiceName: String? = null,
     val ttsEngine: String = "SYSTEM",
+    val vitsModelId: String = "FANCHEN_WNJ",
 )
 
 data class Chapter(

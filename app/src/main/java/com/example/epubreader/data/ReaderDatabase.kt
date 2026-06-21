@@ -54,7 +54,7 @@ interface ReaderDao {
 
 @Database(
     entities = [BookEntity::class, ReadingLocatorEntity::class, ReaderSettingsEntity::class],
-    version = 3,
+    version = 4,
     exportSchema = false,
 )
 abstract class ReaderDatabase : RoomDatabase() {
@@ -65,7 +65,7 @@ abstract class ReaderDatabase : RoomDatabase() {
             context,
             ReaderDatabase::class.java,
             "reader.db",
-        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
+        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build()
 
         internal val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -91,6 +91,14 @@ abstract class ReaderDatabase : RoomDatabase() {
                 db.execSQL("DROP TABLE locators")
                 db.execSQL("ALTER TABLE locators_new RENAME TO locators")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_locators_bookId ON locators(bookId)")
+            }
+        }
+
+        internal val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE settings ADD COLUMN vitsModelId TEXT NOT NULL DEFAULT 'FANCHEN_WNJ'",
+                )
             }
         }
     }

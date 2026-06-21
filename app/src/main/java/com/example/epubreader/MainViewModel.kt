@@ -18,7 +18,10 @@ import com.example.epubreader.data.SentenceRef
 import com.example.epubreader.tts.ReaderTtsService
 import com.example.epubreader.tts.TtsPerformanceSnapshot
 import com.example.epubreader.tts.TtsPerformanceStore
+import com.example.epubreader.tts.VitsModelDescriptor
+import com.example.epubreader.tts.VitsModelId
 import com.example.epubreader.tts.VitsModelManager
+import com.example.epubreader.tts.VitsModelRegistry
 import com.example.epubreader.tts.VitsModelState
 import com.example.epubreader.tts.VitsModelStatus
 import kotlinx.coroutines.Dispatchers
@@ -76,7 +79,8 @@ data class LibraryUiState(
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = (application as ReaderApplication).repository
-    private val vitsModelManager = VitsModelManager(application)
+    private val modelManagers: Map<VitsModelId, VitsModelManager> =
+        VitsModelRegistry.all.associate { it.id to VitsModelManager(application, it) }
     private val ttsPerformanceStore = TtsPerformanceStore(application)
 
     val settings = repository.settings.stateIn(
@@ -84,12 +88,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         SharingStarted.WhileSubscribed(5000),
         null,
     )
-    val vitsModelState: StateFlow<VitsModelState> = vitsModelManager.state.stateIn(
-        viewModelScope,
-        SharingStarted.WhileSubscribed(5000),
-        vitsModelManager.currentState(),
+    val vitsModelStates: StateFlow<Map<VitsModelId, VitsModelState>> =
+        combine(
+            *VitsModelRegistry.all.map { modelManagers.getValue(it.id).state }.toTypedArray(),
+        ) { states ->
+            VitsModelRegistry.all.mapIndexed { i, d -> d.id to states[i] }.toMap()
+        }.stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5000),
+            VitsModelRegistry.all.associate { it.id to modelManagers.getValue(it.id).currentState() },
+        )
+    private val _ttsPerformance = MutableStateFlow(
+        ttsPerformanceStore.snapshot(VitsModelRegistry.WNJ.revision, VitsModelRegistry.WNJ.id.stableValue),
     )
-    private val _ttsPerformance = MutableStateFlow(ttsPerformanceStore.snapshot())
     val ttsPerformance: StateFlow<TtsPerformanceSnapshot> = _ttsPerformance
 
     private val _reader = MutableStateFlow(ReaderUiState())
@@ -149,13 +160,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         viewModelScope.launch {
-            vitsModelState.collect { state ->
-                if (vitsModelManager.shouldSwitchAfterDownload() &&
-                    state.status == VitsModelStatus.READY
-                ) {
-                    vitsModelManager.clearSwitchAfterDownload()
-                    val value = settings.value ?: ReaderSettingsEntity()
-                    repository.saveSettings(value.copy(ttsEngine = TTS_ENGINE_VITS))
+            vitsModelStates.collect { states ->
+                VitsModelRegistry.all.forEach { descriptor ->
+                    val manager = modelManagers.getValue(descriptor.id)
+                    if (manager.shouldSwitchAfterDownload() &&
+                        states[descriptor.id]?.status == VitsModelStatus.READY
+                    ) {
+                        manager.clearSwitchAfterDownload()
+                        val value = settings.value ?: ReaderSettingsEntity()
+                        repository.saveSettings(
+                            value.copy(ttsEngine = TTS_ENGINE_VITS, vitsModelId = descriptor.id.stableValue),
+                        )
+                    }
                 }
             }
         }
@@ -397,33 +413,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun useSystemTts() {
-        vitsModelManager.clearSwitchAfterDownload()
+        modelManagers.values.forEach { it.clearSwitchAfterDownload() }
         updateSettings((settings.value ?: ReaderSettingsEntity()).copy(ttsEngine = TTS_ENGINE_SYSTEM))
     }
 
-    fun useVitsTts() {
-        if (VitsModelManager.isReady(getApplication())) {
-            vitsModelManager.clearSwitchAfterDownload()
-            updateSettings((settings.value ?: ReaderSettingsEntity()).copy(ttsEngine = TTS_ENGINE_VITS))
+    fun useVitsModel(id: VitsModelId) {
+        val manager = modelManagers.getValue(id)
+        val descriptor = VitsModelRegistry.byId(id)
+        if (VitsModelManager.isReady(getApplication(), descriptor)) {
+            manager.clearSwitchAfterDownload()
+            updateSettings(
+                (settings.value ?: ReaderSettingsEntity()).copy(
+                    ttsEngine = TTS_ENGINE_VITS,
+                    vitsModelId = id.stableValue,
+                ),
+            )
         } else {
-            vitsModelManager.requestSwitchAfterDownload()
-            vitsModelManager.download()
+            manager.requestSwitchAfterDownload()
+            manager.download()
         }
     }
 
-    fun cancelVitsDownload() {
-        vitsModelManager.clearSwitchAfterDownload()
-        vitsModelManager.cancel()
+    fun cancelVitsDownload(id: VitsModelId) {
+        val manager = modelManagers.getValue(id)
+        manager.clearSwitchAfterDownload()
+        manager.cancel()
     }
 
-    fun deleteVitsModel() {
-        vitsModelManager.clearSwitchAfterDownload()
-        if (settings.value?.ttsEngine == TTS_ENGINE_VITS) useSystemTts()
-        vitsModelManager.delete()
+    fun deleteVitsModel(id: VitsModelId) {
+        val manager = modelManagers.getValue(id)
+        manager.clearSwitchAfterDownload()
+        val current = settings.value
+        if (current?.ttsEngine == TTS_ENGINE_VITS && current.vitsModelId == id.stableValue) {
+            useSystemTts()
+        }
+        manager.delete()
     }
 
     fun refreshTtsPerformance() {
-        _ttsPerformance.value = ttsPerformanceStore.snapshot()
+        val modelId = VitsModelId.fromStableValue(settings.value?.vitsModelId) ?: VitsModelId.FANCHEN_WNJ
+        val descriptor = VitsModelRegistry.byId(modelId)
+        _ttsPerformance.value = ttsPerformanceStore.snapshot(descriptor.revision, descriptor.id.stableValue)
     }
 
     fun togglePlayPause() {

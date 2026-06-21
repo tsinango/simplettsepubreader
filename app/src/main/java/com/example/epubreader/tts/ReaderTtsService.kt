@@ -43,6 +43,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.io.File
 import java.util.Locale
 
 class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
@@ -63,6 +64,8 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private var utteranceSerial = 0
     private var currentUtteranceId: String? = null
     @Volatile private var activeEngine = MainViewModel.TTS_ENGINE_SYSTEM
+    @Volatile private var activeVitsDescriptor: VitsModelDescriptor = VitsModelRegistry.WNJ
+    @Volatile private var currentBuiltModelId: VitsModelId? = null
     private var offlineTts: OfflineTts? = null
     private lateinit var pipeline: EmbeddedPlaybackPipeline
     private var generationJob: Job? = null
@@ -141,6 +144,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                 val startedAt = SystemClock.elapsedRealtime()
                 offlineTts?.runCatching { release() }
                 offlineTts = null
+                currentBuiltModelId = null
                 val releaseMs = (SystemClock.elapsedRealtime() - startedAt)
                 DiagnosticLogger.event("VITS_ENGINE", "recreate $reason releaseMs=$releaseMs")
             }
@@ -178,6 +182,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                 val startedAt = SystemClock.elapsedRealtime()
                 offlineTts?.runCatching { release() }
                 offlineTts = null
+                currentBuiltModelId = null
                 val releaseMs = (SystemClock.elapsedRealtime() - startedAt)
                 DiagnosticLogger.event(
                     "VITS_ENGINE",
@@ -355,10 +360,12 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private suspend fun applySettings() {
         val settings = repository.settings.first()
         activeEngine = settings?.ttsEngine ?: MainViewModel.TTS_ENGINE_SYSTEM
+        val modelId = VitsModelId.fromStableValue(settings?.vitsModelId) ?: VitsModelId.FANCHEN_WNJ
+        activeVitsDescriptor = VitsModelRegistry.byId(modelId)
         speechRate = TtsRatePolicy.userRate(settings?.speechRate ?: 1f)
         DiagnosticLogger.event(
             "TTS_SETTINGS",
-            "engine=$activeEngine rate=$speechRate pitch=${settings?.pitch ?: 1f}",
+            "engine=$activeEngine model=${activeVitsDescriptor.id.stableValue} rate=$speechRate pitch=${settings?.pitch ?: 1f}",
         )
         tts?.setSpeechRate(speechRate)
         tts?.setPitch(settings?.pitch ?: 1f)
@@ -423,8 +430,9 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun speakEmbedded(sentence: SentenceRef) {
-        if (!VitsModelManager.isReady(this)) {
-            DiagnosticLogger.event("VITS", "model_not_ready")
+        val descriptor = activeVitsDescriptor
+        if (!VitsModelManager.isReady(this, descriptor)) {
+            DiagnosticLogger.event("VITS", "model_not_ready model=${descriptor.id.stableValue}")
             scope.launch { fallbackToSystem("内置语音模型不可用，已切换到系统 TTS") }
             return
         }
@@ -523,44 +531,52 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private fun isGenerationCurrent(serial: Int): Boolean =
         playing && activeEngine == MainViewModel.TTS_ENGINE_VITS && serial == embeddedGenerationSerial
 
-    private fun embeddedTts(): OfflineTts = offlineTts ?: run {
+    private fun embeddedTts(): OfflineTts {
+        val descriptor = activeVitsDescriptor
+        val existing = offlineTts
+        if (existing != null && currentBuiltModelId == descriptor.id) return existing
         val startedAt = SystemClock.elapsedRealtime()
+        existing?.runCatching { release() }
+        offlineTts = null
+        currentBuiltModelId = descriptor.id
         val numThreads = engineThreads
-        val fstPaths = listOf(
-            VitsModelManager.phoneFstFile(this).absolutePath,
-            VitsModelManager.dateFstFile(this).absolutePath,
-            VitsModelManager.numberFstFile(this).absolutePath,
-        ).joinToString(",")
-        OfflineTts(
-        config = OfflineTtsConfig(
-            model = OfflineTtsModelConfig(
-                vits = OfflineTtsVitsModelConfig(
-                    model = VitsModelManager.modelFile(this).absolutePath,
-                    tokens = VitsModelManager.tokensFile(this).absolutePath,
-                    lexicon = VitsModelManager.lexiconFile(this).absolutePath,
+        val modelDir = VitsModelManager.modelDir(this, descriptor)
+        val fstPaths = descriptor.ruleFstFileNames.joinToString(",") { name ->
+            File(modelDir, name).absolutePath
+        }
+        val modelPath = File(modelDir, descriptor.onnxFileName).absolutePath
+        val tokensPath = File(modelDir, descriptor.tokensFileName).absolutePath
+        val lexiconPath = File(modelDir, descriptor.lexiconFileName).absolutePath
+        val created = OfflineTts(
+            config = OfflineTtsConfig(
+                model = OfflineTtsModelConfig(
+                    vits = OfflineTtsVitsModelConfig(
+                        model = modelPath,
+                        tokens = tokensPath,
+                        lexicon = lexiconPath,
+                    ),
+                    numThreads = numThreads,
                 ),
-                numThreads = numThreads,
+                ruleFsts = fstPaths,
+                maxNumSentences = 1,
+                silenceScale = 0.2f,
             ),
-            ruleFsts = fstPaths,
-            maxNumSentences = 1,
-            silenceScale = 0.2f,
-        ),
-        ).also {
+        )
         lastEngineInitMillis = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(1)
-        offlineTts = it
+        offlineTts = created
         if (lastFirstAudioMillis == 0L && playbackRequestedAt > 0L) {
             lastFirstAudioMillis = (SystemClock.elapsedRealtime() - playbackRequestedAt).coerceAtLeast(0)
         }
         DiagnosticLogger.event(
             "VITS_ENGINE",
-            "created initMs=$lastEngineInitMillis threads=$numThreads " +
-                "ruleFsts=[phone,date,number] maxNumSentences=1 silenceScale=0.2 " +
-                "modelReady=${VitsModelManager.isReady(this)} " +
-                "modelBytes=${VitsModelManager.modelFile(this).length()} " +
-                "tokensBytes=${VitsModelManager.tokensFile(this).length()} " +
-                "lexiconBytes=${VitsModelManager.lexiconFile(this).length()}",
+            "created model=${descriptor.id.stableValue} initMs=$lastEngineInitMillis threads=$numThreads " +
+                "ruleFsts=${descriptor.ruleFstFileNames.joinToString(",")} maxNumSentences=1 silenceScale=0.2 " +
+                "modelReady=${VitsModelManager.isReady(this, descriptor)} " +
+                "modelBytes=${File(modelDir, descriptor.onnxFileName).length()} " +
+                "tokensBytes=${File(modelDir, descriptor.tokensFileName).length()} " +
+                "lexiconBytes=${File(modelDir, descriptor.lexiconFileName).length()}",
         )
-    }
+        return created
     }
 
     private suspend fun handleSentenceComplete(key: String) {
@@ -646,6 +662,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
 
     private fun savePerformanceMetrics() {
         performanceStore.saveMetrics(
+            modelRevision = activeVitsDescriptor.revision,
             engineInitMillis = lastEngineInitMillis,
             firstAudioMillis = lastFirstAudioMillis,
             generationMillis = lastGenerationMillis,
@@ -847,6 +864,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                     ?.onSuccess { DiagnosticLogger.event("VITS_ENGINE", "released") }
                     ?.onFailure { DiagnosticLogger.error("VITS_ENGINE", "release_failed", it) }
                 offlineTts = null
+                currentBuiltModelId = null
             }
         }
         super.onDestroy()

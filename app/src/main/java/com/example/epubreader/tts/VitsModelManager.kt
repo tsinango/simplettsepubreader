@@ -32,28 +32,25 @@ data class VitsModelState(
     val error: String? = null,
 )
 
-class VitsModelManager(private val context: Context) {
+/**
+ * Downloads, verifies and reports the state of a single [VitsModelDescriptor].
+ * Each instance is scoped to one model so downloads and ready markers stay
+ * independent. The WNJ-scoped companion accessors are kept for backward
+ * compatibility with existing tests and the benchmark instrumentation test.
+ */
+class VitsModelManager(
+    private val context: Context,
+    private val descriptor: VitsModelDescriptor,
+) {
     private val workManager = WorkManager.getInstance(context)
     private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
 
-    internal data class ModelFileSpec(
-        val name: String,
-        val size: Long,
-        val sha256: String,
-    )
-
-    internal data class ModelFileStatus(
-        val spec: ModelFileSpec,
-        val file: File,
-        val valid: Boolean,
-    )
-
     val state: Flow<VitsModelState> = workManager
-        .getWorkInfosForUniqueWorkFlow(WORK_NAME)
+        .getWorkInfosForUniqueWorkFlow(descriptor.workName)
         .map { infos -> stateFrom(infos.firstOrNull()) }
 
     fun currentState(): VitsModelState =
-        if (isReady(context)) VitsModelState(VitsModelStatus.READY, 100)
+        if (isReady(context, descriptor)) VitsModelState(VitsModelStatus.READY, 100)
         else VitsModelState(VitsModelStatus.NOT_DOWNLOADED)
 
     fun download() {
@@ -64,30 +61,38 @@ class VitsModelManager(private val context: Context) {
                     .setRequiresStorageNotLow(true)
                     .build(),
             )
+            .setInputData(workDataOf(KEY_MODEL_ID to descriptor.id.stableValue))
             .build()
-        workManager.enqueueUniqueWork(WORK_NAME, ExistingWorkPolicy.KEEP, request)
+        workManager.enqueueUniqueWork(descriptor.workName, ExistingWorkPolicy.KEEP, request)
     }
 
-    fun cancel() = workManager.cancelUniqueWork(WORK_NAME)
+    fun cancel() = workManager.cancelUniqueWork(descriptor.workName)
 
     fun requestSwitchAfterDownload() {
-        preferences.edit().putBoolean(KEY_SWITCH_AFTER_DOWNLOAD, true).apply()
+        preferences.edit().putBoolean(switchKey(), true).apply()
     }
 
     fun clearSwitchAfterDownload() {
-        preferences.edit().remove(KEY_SWITCH_AFTER_DOWNLOAD).apply()
+        preferences.edit().remove(switchKey()).apply()
     }
 
     fun shouldSwitchAfterDownload(): Boolean =
-        preferences.getBoolean(KEY_SWITCH_AFTER_DOWNLOAD, false)
+        preferences.getBoolean(switchKey(), false)
 
     fun delete() {
         cancel()
-        modelDir(context).deleteRecursively()
+        modelDir(context, descriptor).deleteRecursively()
     }
 
+    private fun switchKey(): String =
+        if (descriptor.id == VitsModelId.FANCHEN_WNJ) {
+            KEY_SWITCH_AFTER_DOWNLOAD
+        } else {
+            "$KEY_SWITCH_AFTER_DOWNLOAD-${descriptor.id.stableValue}"
+        }
+
     private fun stateFrom(info: WorkInfo?): VitsModelState {
-        if (isReady(context)) return VitsModelState(VitsModelStatus.READY, 100)
+        if (isReady(context, descriptor)) return VitsModelState(VitsModelStatus.READY, 100)
         return when (info?.state) {
             WorkInfo.State.RUNNING, WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED ->
                 VitsModelState(VitsModelStatus.DOWNLOADING, info.progress.getInt(KEY_PROGRESS, 0))
@@ -102,53 +107,54 @@ class VitsModelManager(private val context: Context) {
     companion object {
         const val MODEL_SIZE_BYTES = 123_746_625L
         const val MODEL_SIZE_LABEL = "约 124 MB"
-        internal const val WORK_NAME = "download-vits-fanchen-wnj"
         internal const val KEY_PROGRESS = "progress"
         internal const val KEY_ERROR = "error"
+        internal const val KEY_MODEL_ID = "model_id"
         private const val PREFERENCES_NAME = "vits_model"
         private const val KEY_SWITCH_AFTER_DOWNLOAD = "switch_after_download"
-        private const val READY_FILE = ".ready-75a59ed-v2"
 
-        fun modelDir(context: Context) = File(context.filesDir, "models/vits-zh-hf-fanchen-wnj")
-        fun isReady(context: Context): Boolean =
-            File(modelDir(context), READY_FILE).isFile &&
-                verifyModelFiles(context).all { it.valid }
-        fun modelFile(context: Context) = File(modelDir(context), "vits-zh-hf-fanchen-wnj.onnx")
-        fun tokensFile(context: Context) = File(modelDir(context), "tokens.txt")
-        fun lexiconFile(context: Context) = File(modelDir(context), "lexicon.txt")
-        fun phoneFstFile(context: Context) = File(modelDir(context), "phone.fst")
-        fun dateFstFile(context: Context) = File(modelDir(context), "date.fst")
-        fun numberFstFile(context: Context) = File(modelDir(context), "number.fst")
-        internal fun readyFile(context: Context) = File(modelDir(context), READY_FILE)
+        fun modelDir(context: Context): File = modelDir(context, VitsModelRegistry.WNJ)
+
+        fun modelDir(context: Context, descriptor: VitsModelDescriptor): File =
+            File(context.filesDir, descriptor.dirName)
+
+        fun isReady(context: Context): Boolean = isReady(context, VitsModelRegistry.WNJ)
+
+        fun isReady(context: Context, descriptor: VitsModelDescriptor): Boolean =
+            File(modelDir(context, descriptor), descriptor.readyMarkerName).isFile &&
+                verifyFilesInDir(modelDir(context, descriptor), descriptor.specs).all { it.valid }
+
+        fun modelFile(context: Context): File =
+            File(modelDir(context), VitsModelRegistry.WNJ.onnxFileName)
+        fun tokensFile(context: Context): File =
+            File(modelDir(context), VitsModelRegistry.WNJ.tokensFileName)
+        fun lexiconFile(context: Context): File =
+            File(modelDir(context), VitsModelRegistry.WNJ.lexiconFileName)
+        fun phoneFstFile(context: Context): File = File(modelDir(context), "phone.fst")
+        fun dateFstFile(context: Context): File = File(modelDir(context), "date.fst")
+        fun numberFstFile(context: Context): File = File(modelDir(context), "number.fst")
+
+        internal fun readyFile(context: Context): File =
+            File(modelDir(context), VitsModelRegistry.WNJ.readyMarkerName)
+
+        internal fun readyFile(context: Context, descriptor: VitsModelDescriptor): File =
+            File(modelDir(context, descriptor), descriptor.readyMarkerName)
 
         internal fun verifyModelFiles(context: Context): List<ModelFileStatus> =
-            verifyModelFilesInDir(modelDir(context))
+            verifyFilesInDir(modelDir(context), VitsModelRegistry.WNJ.specs)
 
         internal fun verifyModelFilesInDir(dir: File): List<ModelFileStatus> =
-            MODEL_SPECS.map { spec ->
+            verifyFilesInDir(dir, VitsModelRegistry.WNJ.specs)
+
+        internal fun verifyFilesInDir(dir: File, specs: List<ModelFileSpec>): List<ModelFileStatus> =
+            specs.map { spec ->
                 val file = File(dir, spec.name)
                 val valid = file.isFile && file.length() == spec.size && sha256(file) == spec.sha256
                 ModelFileStatus(spec, file, valid)
             }
 
-        internal val MODEL_SPECS: List<ModelFileSpec> = listOf(
-            ModelFileSpec("vits-zh-hf-fanchen-wnj.onnx", 121_076_185L, "ccd592a5f6fa3f7e8840405c3422ffed9eba58db253d4abd82c75280db98c644"),
-            ModelFileSpec("tokens.txt", 331L, "34b035b9aeb070df6188b022f29c00e0e142c7ade9f25611ced65db5e9cc8402"),
-            ModelFileSpec("lexicon.txt", 2_457_843L, "9af2824e49e731bf615927c768fdc36bbbe894cac57d8e0088d9c94331b07320"),
-            ModelFileSpec("phone.fst", 88_630L, "1ac2b6fa56b1442320c4de7db08353bab8963a2b57f365eebcdd3a2d3562f8d7"),
-            ModelFileSpec("date.fst", 59_154L, "eb8aa079ae3cb81d8f4404992f39d61a0cb990947512b5b8d1e54d1f6980e718"),
-            ModelFileSpec("number.fst", 64_482L, "743f402181fcfebf76cc2f0546b71fa26476e626fbe4e460fb7b4c3a7a8bd5bd"),
-        )
-
-        private const val MODEL_FILE_SIZE = 121_076_185L
-        private const val TOKENS_FILE_SIZE = 331L
-        private const val LEXICON_FILE_SIZE = 2_457_843L
-        private const val PHONE_FST_SIZE = 88_630L
-        private const val DATE_FST_SIZE = 59_154L
-        private const val NUMBER_FST_SIZE = 64_482L
-        private const val PHONE_FST_SHA256 = "1ac2b6fa56b1442320c4de7db08353bab8963a2b57f365eebcdd3a2d3562f8d7"
-        private const val DATE_FST_SHA256 = "eb8aa079ae3cb81d8f4404992f39d61a0cb990947512b5b8d1e54d1f6980e718"
-        private const val NUMBER_FST_SHA256 = "743f402181fcfebf76cc2f0546b71fa26476e626fbe4e460fb7b4c3a7a8bd5bd"
+        internal val MODEL_SPECS: List<ModelFileSpec>
+            get() = VitsModelRegistry.WNJ.specs
 
         internal fun sha256(file: File): String {
             val digest = MessageDigest.getInstance("SHA-256")
@@ -170,9 +176,13 @@ class VitsModelDownloadWorker(
     params: WorkerParameters,
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
-        val dir = VitsModelManager.modelDir(applicationContext).apply { mkdirs() }
-        VitsModelManager.readyFile(applicationContext).delete()
-        val fileStatuses = VitsModelManager.verifyModelFiles(applicationContext)
+        val id = VitsModelId.fromStableValue(inputData.getString(VitsModelManager.KEY_MODEL_ID))
+            ?: return@withContext failure("未知模型 ID")
+        val descriptor = VitsModelRegistry.byId(id)
+        val dir = VitsModelManager.modelDir(applicationContext, descriptor).apply { mkdirs() }
+        VitsModelManager.readyFile(applicationContext, descriptor).delete()
+        val specs = descriptor.specs
+        val fileStatuses = VitsModelManager.verifyFilesInDir(dir, specs)
         val missingOrCorrupt = fileStatuses.filter { !it.valid }
         val requiredBytes = missingOrCorrupt.sumOf { it.spec.size } + 32L * 1024 * 1024
         if (missingOrCorrupt.isNotEmpty() && dir.usableSpace < requiredBytes) {
@@ -183,13 +193,13 @@ class VitsModelDownloadWorker(
         }
         var completed = fileStatuses.filter { it.valid }.sumOf { it.spec.size }
         try {
-            VitsModelManager.MODEL_SPECS.forEach { spec ->
-                download(spec, File(dir, spec.name), completed)
+            specs.forEach { spec ->
+                download(descriptor, spec, File(dir, spec.name), completed)
                 completed += spec.size
             }
-            val ready = VitsModelManager.readyFile(applicationContext)
+            val ready = VitsModelManager.readyFile(applicationContext, descriptor)
             val pendingReady = File(ready.parentFile, "${ready.name}.part")
-            pendingReady.writeText(REVISION)
+            pendingReady.writeText(descriptor.revision)
             check(pendingReady.renameTo(ready)) { "无法保存模型就绪标记" }
             setProgress(workDataOf(VitsModelManager.KEY_PROGRESS to 100))
             Result.success()
@@ -198,7 +208,12 @@ class VitsModelDownloadWorker(
         }
     }
 
-    private suspend fun download(spec: VitsModelManager.ModelFileSpec, target: File, completedBefore: Long) {
+    private suspend fun download(
+        descriptor: VitsModelDescriptor,
+        spec: ModelFileSpec,
+        target: File,
+        completedBefore: Long,
+    ) {
         if (target.isFile && target.length() == spec.size && VitsModelManager.sha256(target) == spec.sha256) return
         val partial = File(target.parentFile, "${target.name}.part")
         var downloaded = partial.takeIf { it.isFile }?.length()?.coerceAtMost(spec.size) ?: 0L
@@ -215,7 +230,7 @@ class VitsModelDownloadWorker(
             partial.delete()
             downloaded = 0L
         }
-        val connection = (URL("$BASE_URL/${spec.name}").openConnection() as HttpURLConnection).apply {
+        val connection = (URL("${descriptor.baseUrl}/${spec.name}").openConnection() as HttpURLConnection).apply {
             connectTimeout = 20_000
             readTimeout = 30_000
             instanceFollowRedirects = true
@@ -259,7 +274,7 @@ class VitsModelDownloadWorker(
                         }
                         sink.write(buffer, 0, count)
                         val percent = (((completedBefore + current) * 100) /
-                            VitsModelManager.MODEL_SIZE_BYTES).toInt().coerceIn(0, 99)
+                            descriptor.totalSizeBytes).toInt().coerceIn(0, 99)
                         setProgress(workDataOf(VitsModelManager.KEY_PROGRESS to percent))
                     }
                 }
@@ -279,11 +294,6 @@ class VitsModelDownloadWorker(
         check(partial.renameTo(target)) { "无法保存 ${spec.name}" }
     }
 
-    private fun failure(message: String) = Result.failure(Data.Builder().putString(VitsModelManager.KEY_ERROR, message).build())
-
-    companion object {
-        private const val REVISION = "75a59ed26f999226f412eb9e1dff31c86b42f082"
-        private const val BASE_URL =
-            "https://huggingface.co/csukuangfj/vits-zh-hf-fanchen-wnj/resolve/$REVISION"
-    }
+    private fun failure(message: String) =
+        Result.failure(Data.Builder().putString(VitsModelManager.KEY_ERROR, message).build())
 }

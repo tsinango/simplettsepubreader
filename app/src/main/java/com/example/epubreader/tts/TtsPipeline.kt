@@ -96,6 +96,7 @@ object TtsRatePolicy {
 }
 
 data class TtsPerformanceSnapshot(
+    val modelId: String = "",
     val cpuThreads: Int = 2,
     val engineInitMillis: Long = 0,
     val firstAudioMillis: Long = 0,

@@ -31,11 +31,11 @@
     <string name="vits_tts">内置 VITS</string>
     <string name="vits_tts_checked">✓ 内置 VITS</string>
     <string name="download_model">下载内置语音模型</string>
-    <string name="download_model_message">需要下载%s，允许使用 Wi‑Fi 或移动网络。下载完成后将自动切换到内置 VITS。</string>
+    <string name="download_model_message">需要下载%s，允许使用 Wi‑Fi 或移动网络。下载完成后将自动切换到该内置模型。</string>
     <string name="download">下载</string>
     <string name="retry_download">重试下载</string>
     <string name="cancel_download">取消下载</string>
-    <string name="delete_model">删除内置模型（释放约 124 MB）</string>
+    <string name="delete_model_label">删除模型（释放 %s）</string>
     <string name="model_downloading">模型下载中 %d%%</string>
     <string name="model_not_downloaded">模型未下载</string>
     <string name="theme_label">主题</string>

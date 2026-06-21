@@ -3,27 +3,35 @@ package com.example.epubreader.tts
 import android.content.Context
 import android.os.Build
 
+/**
+ * Persists per-device CPU thread counts and per-model TTS performance metrics.
+ *
+ * Metrics are keyed by the active model's revision so that WNJ and MeloTTS
+ * real-time factors are never mixed. CPU thread counts are device-level and
+ * shared across models.
+ */
 class TtsPerformanceStore(context: Context) {
     private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
-    private val profileKey = "${Build.MANUFACTURER}:${Build.MODEL}:${Build.VERSION.SDK_INT}:$MODEL_REVISION"
 
     fun cpuThreads(): Int {
         val savedProfile = preferences.getString(KEY_PROFILE, null)
-        if (savedProfile == profileKey) return preferences.getInt(KEY_CPU_THREADS, defaultCpuThreads())
+        if (savedProfile == deviceProfile) return preferences.getInt(KEY_CPU_THREADS, defaultCpuThreads())
         return defaultCpuThreads()
     }
 
-    fun snapshot(): TtsPerformanceSnapshot = TtsPerformanceSnapshot(
+    fun snapshot(modelRevision: String, modelId: String): TtsPerformanceSnapshot = TtsPerformanceSnapshot(
+        modelId = modelId,
         cpuThreads = cpuThreads(),
-        engineInitMillis = preferences.getLong(KEY_ENGINE_INIT_MS, 0),
-        firstAudioMillis = preferences.getLong(KEY_FIRST_AUDIO_MS, 0),
-        generationMillis = preferences.getLong(KEY_GENERATION_MS, 0),
-        realTimeFactor = preferences.getFloat(KEY_RTF, 0f),
-        prefetchHitRate = preferences.getFloat(KEY_PREFETCH_HIT_RATE, 0f),
-        gapMillis = preferences.getLong(KEY_GAP_MS, 0),
+        engineInitMillis = preferences.getLong(metricKey(KEY_ENGINE_INIT_MS, modelRevision), 0),
+        firstAudioMillis = preferences.getLong(metricKey(KEY_FIRST_AUDIO_MS, modelRevision), 0),
+        generationMillis = preferences.getLong(metricKey(KEY_GENERATION_MS, modelRevision), 0),
+        realTimeFactor = preferences.getFloat(metricKey(KEY_RTF, modelRevision), 0f),
+        prefetchHitRate = preferences.getFloat(metricKey(KEY_PREFETCH_HIT_RATE, modelRevision), 0f),
+        gapMillis = preferences.getLong(metricKey(KEY_GAP_MS, modelRevision), 0),
     )
 
     fun saveMetrics(
+        modelRevision: String,
         engineInitMillis: Long,
         firstAudioMillis: Long,
         generationMillis: Long,
@@ -32,23 +40,27 @@ class TtsPerformanceStore(context: Context) {
         gapMillis: Long,
     ) {
         preferences.edit()
-            .putString(KEY_PROFILE, profileKey)
+            .putString(KEY_PROFILE, deviceProfile)
             .putInt(KEY_CPU_THREADS, cpuThreads())
-            .putLong(KEY_ENGINE_INIT_MS, engineInitMillis)
-            .putLong(KEY_FIRST_AUDIO_MS, firstAudioMillis)
-            .putLong(KEY_GENERATION_MS, generationMillis)
-            .putFloat(KEY_RTF, realTimeFactor)
-            .putFloat(KEY_PREFETCH_HIT_RATE, prefetchHitRate)
-            .putLong(KEY_GAP_MS, gapMillis)
+            .putLong(metricKey(KEY_ENGINE_INIT_MS, modelRevision), engineInitMillis)
+            .putLong(metricKey(KEY_FIRST_AUDIO_MS, modelRevision), firstAudioMillis)
+            .putLong(metricKey(KEY_GENERATION_MS, modelRevision), generationMillis)
+            .putFloat(metricKey(KEY_RTF, modelRevision), realTimeFactor)
+            .putFloat(metricKey(KEY_PREFETCH_HIT_RATE, modelRevision), prefetchHitRate)
+            .putLong(metricKey(KEY_GAP_MS, modelRevision), gapMillis)
             .apply()
     }
+
+    private fun metricKey(base: String, revision: String) = "$base:$revision"
+
+    private val deviceProfile: String
+        get() = "${Build.MANUFACTURER}:${Build.MODEL}:${Build.VERSION.SDK_INT}"
 
     private fun defaultCpuThreads(): Int =
         Runtime.getRuntime().availableProcessors().coerceIn(MIN_CPU_THREADS, MAX_CPU_THREADS)
 
     companion object {
         private const val PREFERENCES_NAME = "tts_performance"
-        private const val MODEL_REVISION = "75a59ed26f999226f412eb9e1dff31c86b42f082"
         private const val KEY_PROFILE = "profile"
         private const val KEY_CPU_THREADS = "cpu_threads"
         private const val KEY_ENGINE_INIT_MS = "engine_init_ms"

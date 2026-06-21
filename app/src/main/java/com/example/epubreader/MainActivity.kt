@@ -42,7 +42,7 @@ private fun ReaderApp(vm: MainViewModel = viewModel()) {
     val settings by vm.settings.collectAsStateWithLifecycle()
     val library by vm.library.collectAsStateWithLifecycle()
     val position by vm.readerPosition.collectAsStateWithLifecycle()
-    val vitsModelState by vm.vitsModelState.collectAsStateWithLifecycle()
+    val vitsModelStates by vm.vitsModelStates.collectAsStateWithLifecycle()
     val ttsPerformance by vm.ttsPerformance.collectAsStateWithLifecycle()
     var currentBookId by rememberSaveable { mutableStateOf<String?>(null) }
     val theme = settings?.theme ?: "SYSTEM"
@@ -61,7 +61,7 @@ private fun ReaderApp(vm: MainViewModel = viewModel()) {
                 state = reader,
                 position = position,
                 settings = s,
-                vitsModelState = vitsModelState,
+                vitsModelStates = vitsModelStates,
                 ttsPerformance = ttsPerformance,
                 onBack = {
                     currentBookId = null

@@ -68,6 +68,7 @@ import com.example.epubreader.ReaderUiState
 import com.example.epubreader.data.Chapter
 import com.example.epubreader.data.ReaderSettingsEntity
 import com.example.epubreader.data.SentenceRef
+import com.example.epubreader.tts.VitsModelId
 import com.example.epubreader.tts.VitsModelState
 import com.example.epubreader.tts.TtsPerformanceSnapshot
 import java.util.Locale
@@ -83,7 +84,7 @@ fun ReaderScreen(
     state: ReaderUiState,
     position: ReaderPositionState,
     settings: ReaderSettingsEntity,
-    vitsModelState: VitsModelState,
+    vitsModelStates: Map<VitsModelId, VitsModelState>,
     ttsPerformance: TtsPerformanceSnapshot,
     onBack: () -> Unit,
 ) {
@@ -264,13 +265,13 @@ fun ReaderScreen(
     if (showSettings) {
         SettingsDialog(
             current = settings,
-            modelState = vitsModelState,
+            modelStates = vitsModelStates,
             performance = ttsPerformance,
             onChange = vm::updateSettings,
             onUseSystemTts = vm::useSystemTts,
-            onUseVitsTts = vm::useVitsTts,
-            onCancelDownload = vm::cancelVitsDownload,
-            onDeleteModel = vm::deleteVitsModel,
+            onUseVitsModel = vm::useVitsModel,
+            onCancelVitsDownload = vm::cancelVitsDownload,
+            onDeleteVitsModel = vm::deleteVitsModel,
             onExportDiagnostics = {
                 diagnosticExportMessage = null
                 diagnosticExporter.launch(DiagnosticLogger.defaultExportFileName())

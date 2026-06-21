@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -86,9 +87,9 @@ class ReaderDatabaseMigrationTest {
             raw.version = 2
         }
 
-        // Open with Room; the 2->3 migration must run and pass schema validation.
+        // Open with Room; the 2->3 and 3->4 migrations must run and pass schema validation.
         val migrated = Room.databaseBuilder(context, ReaderDatabase::class.java, dbName)
-            .addMigrations(ReaderDatabase.MIGRATION_2_3)
+            .addMigrations(ReaderDatabase.MIGRATION_2_3, ReaderDatabase.MIGRATION_3_4)
             .build()
         val locators = migrated.dao().locators().first()
         assertEquals(1, locators.size)
@@ -103,5 +104,26 @@ class ReaderDatabaseMigrationTest {
             }
         assertTrue("index_locators_bookId missing after migration", "index_locators_bookId" in indexNames)
         migrated.close()
+    }
+
+    @Test
+    fun settingsRoundTripPersistsVitsModelId() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, ReaderDatabase::class.java).build()
+        db.dao().saveSettings(
+            ReaderSettingsEntity(ttsEngine = "VITS", vitsModelId = "MELO_TTS_ZH_EN"),
+        )
+        val saved = db.dao().settings().first()
+        assertNotNull(saved)
+        assertEquals("VITS", saved!!.ttsEngine)
+        assertEquals("MELO_TTS_ZH_EN", saved.vitsModelId)
+        db.close()
+    }
+
+    @Test
+    fun settingsDefaultVitsModelIdIsFanchenWnj() {
+        val defaults = ReaderSettingsEntity()
+        assertEquals("FANCHEN_WNJ", defaults.vitsModelId)
+        assertEquals("SYSTEM", defaults.ttsEngine)
     }
 }

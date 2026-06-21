@@ -26,21 +26,23 @@ import androidx.compose.ui.unit.dp
 import com.example.epubreader.MainViewModel
 import com.example.epubreader.R
 import com.example.epubreader.data.ReaderSettingsEntity
-import com.example.epubreader.tts.VitsModelManager
+import com.example.epubreader.tts.TtsPerformanceSnapshot
+import com.example.epubreader.tts.VitsModelDescriptor
+import com.example.epubreader.tts.VitsModelId
+import com.example.epubreader.tts.VitsModelRegistry
 import com.example.epubreader.tts.VitsModelState
 import com.example.epubreader.tts.VitsModelStatus
-import com.example.epubreader.tts.TtsPerformanceSnapshot
 
 @Composable
 fun SettingsDialog(
     current: ReaderSettingsEntity,
-    modelState: VitsModelState,
+    modelStates: Map<VitsModelId, VitsModelState>,
     performance: TtsPerformanceSnapshot,
     onChange: (ReaderSettingsEntity) -> Unit,
     onUseSystemTts: () -> Unit,
-    onUseVitsTts: () -> Unit,
-    onCancelDownload: () -> Unit,
-    onDeleteModel: () -> Unit,
+    onUseVitsModel: (VitsModelId) -> Unit,
+    onCancelVitsDownload: (VitsModelId) -> Unit,
+    onDeleteVitsModel: (VitsModelId) -> Unit,
     onExportDiagnostics: () -> Unit,
     diagnosticExportMessage: String?,
     onClearDiagnostics: () -> Unit,
@@ -49,10 +51,10 @@ fun SettingsDialog(
 ) {
     val context = LocalContext.current
     var value by remember { mutableStateOf(current) }
-    var confirmDownload by remember { mutableStateOf(false) }
+    var confirmDownloadModel by remember { mutableStateOf<VitsModelId?>(null) }
     var confirmClearLog by remember { mutableStateOf(false) }
-    LaunchedEffect(current.ttsEngine) {
-        value = value.copy(ttsEngine = current.ttsEngine)
+    LaunchedEffect(current.ttsEngine, current.vitsModelId) {
+        value = value.copy(ttsEngine = current.ttsEngine, vitsModelId = current.vitsModelId)
     }
     AlertDialog(
         onDismissRequest = onClose,
@@ -74,39 +76,29 @@ fun SettingsDialog(
                         Text(if (value.ttsEngine == MainViewModel.TTS_ENGINE_SYSTEM)
                             context.getString(R.string.system_tts_checked) else context.getString(R.string.system_tts))
                     }
-                    TextButton(onClick = {
-                        if (modelState.status == VitsModelStatus.READY) {
-                            value = value.copy(ttsEngine = MainViewModel.TTS_ENGINE_VITS)
-                            onUseVitsTts()
-                        } else {
-                            confirmDownload = true
-                        }
-                    }) {
-                        Text(if (value.ttsEngine == MainViewModel.TTS_ENGINE_VITS)
-                            context.getString(R.string.vits_tts_checked) else context.getString(R.string.vits_tts))
-                    }
                 }
-                when (modelState.status) {
-                    VitsModelStatus.DOWNLOADING -> {
-                        Text(context.getString(R.string.model_downloading, modelState.progress))
-                        TextButton(onClick = onCancelDownload) { Text(context.getString(R.string.cancel_download)) }
-                    }
-                    VitsModelStatus.READY ->
-                        TextButton(onClick = onDeleteModel) { Text(context.getString(R.string.delete_model)) }
-                    VitsModelStatus.FAILED -> {
-                        Text(modelState.error ?: context.getString(R.string.model_not_downloaded),
-                            color = MaterialTheme.colorScheme.error)
-                        TextButton(onClick = { confirmDownload = true }) { Text(context.getString(R.string.retry_download)) }
-                    }
-                    VitsModelStatus.NOT_DOWNLOADED -> Text(context.getString(R.string.model_not_downloaded))
-                }
-                if (modelState.status == VitsModelStatus.READY) {
-                    Text(
-                        "当前：CPU / ${performance.cpuThreads} 线程" +
-                            if (performance.realTimeFactor > 0f) {
-                                "，RTF ${"%.2f".format(performance.realTimeFactor)}，预取 ${"%.0f".format(performance.prefetchHitRate * 100)}%" +
-                                    "，首音频 ${performance.firstAudioMillis} ms"
-                            } else "",
+                VitsModelRegistry.all.forEach { descriptor ->
+                    VitsModelSection(
+                        descriptor = descriptor,
+                        state = modelStates[descriptor.id] ?: VitsModelState(VitsModelStatus.NOT_DOWNLOADED),
+                        selected = value.ttsEngine == MainViewModel.TTS_ENGINE_VITS &&
+                            value.vitsModelId == descriptor.id.stableValue,
+                        performance = performance,
+                        onSelectAttempt = {
+                            val st = modelStates[descriptor.id]?.status ?: VitsModelStatus.NOT_DOWNLOADED
+                            if (st == VitsModelStatus.READY) {
+                                value = value.copy(
+                                    ttsEngine = MainViewModel.TTS_ENGINE_VITS,
+                                    vitsModelId = descriptor.id.stableValue,
+                                )
+                                onUseVitsModel(descriptor.id)
+                            } else {
+                                confirmDownloadModel = descriptor.id
+                            }
+                        },
+                        onDownload = { onUseVitsModel(descriptor.id) },
+                        onCancel = { onCancelVitsDownload(descriptor.id) },
+                        onDelete = { onDeleteVitsModel(descriptor.id) },
                     )
                 }
                 Text(context.getString(R.string.theme_label))
@@ -145,16 +137,27 @@ fun SettingsDialog(
             TextButton(onClick = onClose) { Text(context.getString(R.string.cancel)) }
         },
     )
-    if (confirmDownload) {
+    confirmDownloadModel?.let { id ->
+        val descriptor = VitsModelRegistry.byId(id)
         AlertDialog(
-            onDismissRequest = { confirmDownload = false },
+            onDismissRequest = { confirmDownloadModel = null },
             title = { Text(context.getString(R.string.download_model)) },
-            text = { Text(context.getString(R.string.download_model_message, VitsModelManager.MODEL_SIZE_LABEL)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(context.getString(R.string.download_model_message, descriptor.sizeLabel))
+                    Text(
+                        descriptor.description,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
             confirmButton = {
-                Button(onClick = { confirmDownload = false; onUseVitsTts() }) { Text(context.getString(R.string.download)) }
+                Button(onClick = { confirmDownloadModel = null; onUseVitsModel(id) }) {
+                    Text(context.getString(R.string.download))
+                }
             },
             dismissButton = {
-                TextButton(onClick = { confirmDownload = false }) { Text(context.getString(R.string.cancel)) }
+                TextButton(onClick = { confirmDownloadModel = null }) { Text(context.getString(R.string.cancel)) }
             },
         )
     }
@@ -170,6 +173,60 @@ fun SettingsDialog(
                 TextButton(onClick = { confirmClearLog = false }) { Text(context.getString(R.string.cancel)) }
             },
         )
+    }
+}
+
+@Composable
+private fun VitsModelSection(
+    descriptor: VitsModelDescriptor,
+    state: VitsModelState,
+    selected: Boolean,
+    performance: TtsPerformanceSnapshot,
+    onSelectAttempt: () -> Unit,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val context = LocalContext.current
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        TextButton(onClick = onSelectAttempt) {
+            Text(if (selected) "✓ ${descriptor.id.displayName}" else descriptor.id.displayName)
+        }
+    }
+    Text(
+        descriptor.description,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    when (state.status) {
+        VitsModelStatus.DOWNLOADING -> {
+            Text(context.getString(R.string.model_downloading, state.progress))
+            TextButton(onClick = onCancel) { Text(context.getString(R.string.cancel_download)) }
+        }
+        VitsModelStatus.READY -> {
+            TextButton(onClick = onDelete) {
+                Text(context.getString(R.string.delete_model_label, descriptor.sizeLabel))
+            }
+            if (selected) {
+                Text(
+                    "当前：CPU / ${performance.cpuThreads} 线程" +
+                        if (performance.realTimeFactor > 0f) {
+                            "，RTF ${"%.2f".format(performance.realTimeFactor)}，预取 ${"%.0f".format(performance.prefetchHitRate * 100)}%" +
+                                "，首音频 ${performance.firstAudioMillis} ms"
+                        } else "",
+                )
+            }
+        }
+        VitsModelStatus.FAILED -> {
+            Text(
+                state.error ?: context.getString(R.string.model_not_downloaded),
+                color = MaterialTheme.colorScheme.error,
+            )
+            TextButton(onClick = onDownload) { Text(context.getString(R.string.retry_download)) }
+        }
+        VitsModelStatus.NOT_DOWNLOADED -> {
+            Text(context.getString(R.string.model_not_downloaded))
+            TextButton(onClick = onDownload) { Text(context.getString(R.string.download)) }
+        }
     }
 }
 
