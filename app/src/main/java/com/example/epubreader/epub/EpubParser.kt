@@ -23,8 +23,8 @@ class EpubParser {
         safeFeature("http://xml.org/sax/features/external-parameter-entities", false)
         safeFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false)
         safeFeature("http://apache.org/xml/features/nonvalidating/load-external-schema", false)
-        setAttribute("http://javax.xml.XMLConstants/property/accessExternalDTD", "")
-        setAttribute("http://javax.xml.XMLConstants/property/accessExternalSchema", "")
+        safeAttribute("http://javax.xml.XMLConstants/property/accessExternalDTD", "")
+        safeAttribute("http://javax.xml.XMLConstants/property/accessExternalSchema", "")
     }
 
     fun parse(file: File): ParsedBook {
@@ -293,6 +293,14 @@ class EpubParser {
         try {
             setFeature(name, enabled)
         } catch (_: ParserConfigurationException) {
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun DocumentBuilderFactory.safeAttribute(name: String, value: String) {
+        try {
+            setAttribute(name, value)
+        } catch (_: IllegalArgumentException) {
         } catch (_: Exception) {
         }
     }
