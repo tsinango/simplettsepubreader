@@ -27,6 +27,7 @@ object DiagnosticLogger {
     private const val MAX_EXIT_TRACE_BYTES = 64 * 1024
     private const val PREFERENCES = "diagnostic_log"
     private const val KEY_LAST_EXIT_TIMESTAMP = "last_exit_timestamp"
+    private const val KEY_LAST_EXIT_CRASH_NATIVE = "last_exit_crash_native"
 
     @Volatile private var applicationContext: Context? = null
     @Volatile private var store: DiagnosticFileStore? = null
@@ -106,6 +107,10 @@ object DiagnosticLogger {
     fun defaultExportFileName(nowMillis: Long = System.currentTimeMillis()): String =
         "tts-reader-diagnostics-${SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date(nowMillis))}.txt"
 
+    fun wasPreviousExitNativeCrash(context: Context): Boolean =
+        context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+            .getBoolean(KEY_LAST_EXIT_CRASH_NATIVE, false)
+
     private fun appVersion(context: Context): String = runCatching {
         context.packageManager.getPackageInfo(context.packageName, 0).let { info ->
             "${info.versionName.orEmpty()}(${info.longVersionCode})"
@@ -127,7 +132,10 @@ object DiagnosticLogger {
                 ?: return
             val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
             if (exit.timestamp <= preferences.getLong(KEY_LAST_EXIT_TIMESTAMP, 0L)) return
-            preferences.edit().putLong(KEY_LAST_EXIT_TIMESTAMP, exit.timestamp).apply()
+            preferences.edit()
+                .putLong(KEY_LAST_EXIT_TIMESTAMP, exit.timestamp)
+                .putBoolean(KEY_LAST_EXIT_CRASH_NATIVE, exit.reason == ApplicationExitInfo.REASON_CRASH_NATIVE)
+                .apply()
             event(
                 "PROCESS_EXIT",
                 "timestamp=${DiagnosticLogFormatter.timestamp(exit.timestamp)} " +

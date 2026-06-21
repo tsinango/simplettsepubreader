@@ -26,6 +26,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -112,6 +113,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     vitsModelManager.clearSwitchAfterDownload()
                     val value = settings.value ?: ReaderSettingsEntity()
                     updateSettings(value.copy(ttsEngine = TTS_ENGINE_VITS))
+                }
+            }
+        }
+
+        if (DiagnosticLogger.wasPreviousExitNativeCrash(application)) {
+            viewModelScope.launch {
+                val current = repository.settings.first()
+                if (current?.ttsEngine == TTS_ENGINE_VITS) {
+                    updateSettings(current.copy(ttsEngine = TTS_ENGINE_SYSTEM))
+                    DiagnosticLogger.event("TTS_FALLBACK", "auto_switch_to_system_after_native_crash")
                 }
             }
         }
