@@ -11,13 +11,13 @@ class EmbeddedModelRegistryTest {
     @Test
     fun registryCoversAllEmbeddedModels() {
         val all = EmbeddedModelRegistry.all
-        // WNJ, MeloTTS, KokoroMultiLangv1_1
-        assertEquals(3, all.size)
+        assertEquals(4, all.size)
         assertEquals(
             setOf(
                 VitsModelId.FANCHEN_WNJ,
                 VitsModelId.MELO_TTS_ZH_EN,
                 VitsModelId.KOKORO_MULTI_ZH,
+                VitsModelId.BERT_VITS2_MNN_22K,
             ),
             all.map { it.id }.toSet(),
         )
@@ -25,13 +25,14 @@ class EmbeddedModelRegistryTest {
 
     @Test
     fun registryGroupsByEngineKind() {
-        // VITS class includes WNJ + MeloTTS; Kokoro has its own engine kind.
         EmbeddedModelRegistry.all.forEach { d ->
             when (d.id) {
                 VitsModelId.FANCHEN_WNJ, VitsModelId.MELO_TTS_ZH_EN ->
                     assertEquals(TtsEngineKind.SHERPA_VITS, d.engineKind)
                 VitsModelId.KOKORO_MULTI_ZH ->
                     assertEquals(TtsEngineKind.SHERPA_KOKORO, d.engineKind)
+                VitsModelId.BERT_VITS2_MNN_22K ->
+                    assertEquals(TtsEngineKind.BERT_VITS2_MNN, d.engineKind)
             }
         }
     }
@@ -67,5 +68,6 @@ class EmbeddedModelRegistryTest {
         assertTrue(EmbeddedModelRegistry.byId(VitsModelId.FANCHEN_WNJ) is VitsModelDescriptor)
         assertTrue(EmbeddedModelRegistry.byId(VitsModelId.MELO_TTS_ZH_EN) is VitsModelDescriptor)
         assertTrue(EmbeddedModelRegistry.byId(VitsModelId.KOKORO_MULTI_ZH) is KokoroModelDescriptor)
+        assertTrue(EmbeddedModelRegistry.byId(VitsModelId.BERT_VITS2_MNN_22K) is BertVits2MnnPackDescriptor)
     }
 }

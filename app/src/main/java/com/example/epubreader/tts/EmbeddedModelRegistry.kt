@@ -16,6 +16,7 @@ object EmbeddedModelRegistry {
         VitsModelRegistry.WNJ,
         VitsModelRegistry.MELO,
         KokoroModelRegistry.kokoroMultiLangV1_1,
+        BertVits2MnnModelRegistry.bertVits2Mnn22k,
     )
 
     fun byId(id: VitsModelId): TtsModelPackDescriptor =
