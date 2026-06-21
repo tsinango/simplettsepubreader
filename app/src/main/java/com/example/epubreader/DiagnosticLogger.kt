@@ -222,8 +222,12 @@ internal class DiagnosticFileStore(
     @Synchronized
     fun clear() {
         directory.mkdirs()
-        current.delete()
-        previous.delete()
+        if (current.isFile && !current.delete()) {
+            error("删除 ${current.name} 失败")
+        }
+        if (previous.isFile && !previous.delete()) {
+            error("删除 ${previous.name} 失败")
+        }
     }
 
     @Synchronized
