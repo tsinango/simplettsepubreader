@@ -451,7 +451,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                 pipeline.closeChannel()
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 DiagnosticLogger.error("VITS", "pipeline_failed serial=$serial", e)
                 if (pipeline.isCurrentSerial(serial) && playing) {
                     pipeline.closeChannel()

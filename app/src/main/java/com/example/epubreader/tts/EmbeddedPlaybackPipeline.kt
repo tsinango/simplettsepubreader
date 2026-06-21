@@ -138,7 +138,7 @@ class EmbeddedPlaybackPipeline(
                 drainRemainingAudio(s)
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 DiagnosticLogger.error("AUDIO_TRACK", "consumer_failed serial=$s", e)
             }
         }
