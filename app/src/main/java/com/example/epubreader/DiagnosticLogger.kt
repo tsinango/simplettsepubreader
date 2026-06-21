@@ -104,6 +104,10 @@ object DiagnosticLogger {
         }
     }
 
+    fun clear(): Result<Unit> = runCatching {
+        store?.clear() ?: error("DiagnosticLogger not initialized")
+    }
+
     fun defaultExportFileName(nowMillis: Long = System.currentTimeMillis()): String =
         "tts-reader-diagnostics-${SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date(nowMillis))}.txt"
 
@@ -213,6 +217,13 @@ internal class DiagnosticFileStore(
             current.renameTo(previous)
         }
         FileOutputStream(current, true).use { it.write(bytes) }
+    }
+
+    @Synchronized
+    fun clear() {
+        directory.mkdirs()
+        current.delete()
+        previous.delete()
     }
 
     @Synchronized

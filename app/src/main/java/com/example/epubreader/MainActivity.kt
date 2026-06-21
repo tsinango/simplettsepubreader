@@ -289,6 +289,7 @@ private fun ReaderScreen(
     val context = LocalContext.current
     val uiScope = rememberCoroutineScope()
     var diagnosticExportMessage by remember { mutableStateOf<String?>(null) }
+    var diagnosticClearMessage by remember { mutableStateOf<String?>(null) }
     val diagnosticExporter = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("text/plain"),
     ) { uri ->
@@ -302,6 +303,18 @@ private fun ReaderScreen(
                     onFailure = { "保存失败：${it.message ?: "未知错误"}" },
                 )
             }
+        }
+    }
+    fun onClearDiagnostics() {
+        uiScope.launch {
+            diagnosticClearMessage = null
+            val result = withContext(Dispatchers.IO) {
+                DiagnosticLogger.clear()
+            }
+            diagnosticClearMessage = result.fold(
+                onSuccess = { "诊断日志已清空" },
+                onFailure = { "清空失败：${it.message ?: "未知错误"}" },
+            )
         }
     }
     val window = context.findActivity()?.window
@@ -481,6 +494,8 @@ private fun ReaderScreen(
                 diagnosticExporter.launch(DiagnosticLogger.defaultExportFileName())
             },
             diagnosticExportMessage = diagnosticExportMessage,
+            onClearDiagnostics = ::onClearDiagnostics,
+            diagnosticClearMessage = diagnosticClearMessage,
             onClose = { showSettings = false },
         )
     }
@@ -720,10 +735,13 @@ private fun SettingsDialog(
     onDeleteModel: () -> Unit,
     onExportDiagnostics: () -> Unit,
     diagnosticExportMessage: String?,
+    onClearDiagnostics: () -> Unit,
+    diagnosticClearMessage: String?,
     onClose: () -> Unit,
 ) {
     var value by remember { mutableStateOf(current) }
     var confirmDownload by remember { mutableStateOf(false) }
+    var confirmClearLog by remember { mutableStateOf(false) }
     LaunchedEffect(current.ttsEngine) {
         value = value.copy(ttsEngine = current.ttsEngine)
     }
@@ -799,6 +817,17 @@ private fun SettingsDialog(
                         },
                     )
                 }
+                TextButton(onClick = { confirmClearLog = true }) { Text("清空诊断日志") }
+                diagnosticClearMessage?.let { message ->
+                    Text(
+                        message,
+                        color = if (message.startsWith("清空失败")) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
             }
         },
         confirmButton = {
@@ -818,6 +847,19 @@ private fun SettingsDialog(
             },
             dismissButton = {
                 TextButton(onClick = { confirmDownload = false }) { Text("取消") }
+            },
+        )
+    }
+    if (confirmClearLog) {
+        AlertDialog(
+            onDismissRequest = { confirmClearLog = false },
+            title = { Text("清空诊断日志") },
+            text = { Text("确定要清空所有诊断日志吗？此操作不可恢复。") },
+            confirmButton = {
+                Button(onClick = { confirmClearLog = false; onClearDiagnostics() }) { Text("清空") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClearLog = false }) { Text("取消") }
             },
         )
     }
