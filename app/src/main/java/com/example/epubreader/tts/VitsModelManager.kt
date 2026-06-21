@@ -37,17 +37,29 @@ data class VitsModelState(
  * Each instance is scoped to one model so downloads and ready markers stay
  * independent. The WNJ-scoped companion accessors are kept for backward
  * compatibility with existing tests and the benchmark instrumentation test.
+ *
+ * Readiness checks exposed to the UI, WorkManager Flow and TTS service are
+ * fast and non-blocking: they only inspect the ready marker, its pinned
+ * revision and file sizes. Full SHA-256 verification runs exclusively inside
+ * [VitsModelDownloadWorker] on `Dispatchers.IO`, and the ready marker is
+ * written only after every file has been downloaded and hash-verified.
  */
 class VitsModelManager(
     private val context: Context,
     private val descriptor: VitsModelDescriptor,
 ) {
-    private val workManager = WorkManager.getInstance(context)
+    private val workManager by lazy { WorkManager.getInstance(context) }
     private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
 
-    val state: Flow<VitsModelState> = workManager
-        .getWorkInfosForUniqueWorkFlow(descriptor.workName)
-        .map { infos -> stateFrom(infos.firstOrNull()) }
+    init {
+        migrateLegacySwitchKeys()
+    }
+
+    val state: Flow<VitsModelState> by lazy {
+        workManager
+            .getWorkInfosForUniqueWorkFlow(descriptor.workName)
+            .map { infos -> stateFrom(infos.firstOrNull()) }
+    }
 
     fun currentState(): VitsModelState =
         if (isReady(context, descriptor)) VitsModelState(VitsModelStatus.READY, 100)
@@ -68,28 +80,40 @@ class VitsModelManager(
 
     fun cancel() = workManager.cancelUniqueWork(descriptor.workName)
 
+    /**
+     * Records this model as the one the user wants to switch to once it becomes
+     * READY. Overwrites any previously pending target so only the most recent
+     * choice wins.
+     */
     fun requestSwitchAfterDownload() {
-        preferences.edit().putBoolean(switchKey(), true).apply()
+        preferences.edit().putString(KEY_PENDING_MODEL_ID, descriptor.id.stableValue).apply()
     }
 
-    fun clearSwitchAfterDownload() {
-        preferences.edit().remove(switchKey()).apply()
+    /** The model the user is waiting to switch to, or null if none. */
+    fun pendingSwitchTarget(): VitsModelId? = pendingSwitchTarget(preferences)
+
+    /** Clears the pending switch unconditionally. */
+    fun clearPendingSwitch() {
+        preferences.edit().remove(KEY_PENDING_MODEL_ID).apply()
     }
 
-    fun shouldSwitchAfterDownload(): Boolean =
-        preferences.getBoolean(switchKey(), false)
+    /**
+     * Clears the pending switch only when it currently points at [id], so
+     * cancelling or deleting one model does not clobber a pending target that
+     * the user has since moved to another model.
+     */
+    fun clearPendingSwitch(id: VitsModelId) {
+        val editor = preferences.edit()
+        if (VitsModelId.fromStableValue(preferences.getString(KEY_PENDING_MODEL_ID, null)) == id) {
+            editor.remove(KEY_PENDING_MODEL_ID)
+        }
+        editor.apply()
+    }
 
     fun delete() {
         cancel()
         modelDir(context, descriptor).deleteRecursively()
     }
-
-    private fun switchKey(): String =
-        if (descriptor.id == VitsModelId.FANCHEN_WNJ) {
-            KEY_SWITCH_AFTER_DOWNLOAD
-        } else {
-            "$KEY_SWITCH_AFTER_DOWNLOAD-${descriptor.id.stableValue}"
-        }
 
     private fun stateFrom(info: WorkInfo?): VitsModelState {
         if (isReady(context, descriptor)) return VitsModelState(VitsModelStatus.READY, 100)
@@ -104,6 +128,34 @@ class VitsModelManager(
         }
     }
 
+    private fun migrateLegacySwitchKeys() {
+        val all = preferences.all
+        if (all.isEmpty()) return
+        val editor = preferences.edit()
+        var migrated = false
+        val currentPending = preferences.getString(KEY_PENDING_MODEL_ID, null)
+        all.forEach { (key, value) ->
+            when {
+                key == KEY_LEGACY_SWITCH_AFTER_DOWNLOAD && value == true && currentPending == null -> {
+                    editor.putString(KEY_PENDING_MODEL_ID, VitsModelId.FANCHEN_WNJ.stableValue)
+                    editor.remove(key)
+                    migrated = true
+                }
+                key.startsWith(KEY_LEGACY_SWITCH_PREFIX_SEP) -> {
+                    val legacyId = key.removePrefix(KEY_LEGACY_SWITCH_PREFIX_SEP)
+                    if (value == true && currentPending == null) {
+                        VitsModelId.fromStableValue(legacyId)?.let {
+                            editor.putString(KEY_PENDING_MODEL_ID, it.stableValue)
+                        }
+                    }
+                    editor.remove(key)
+                    migrated = true
+                }
+            }
+        }
+        if (migrated) editor.apply()
+    }
+
     companion object {
         const val MODEL_SIZE_BYTES = 123_746_625L
         const val MODEL_SIZE_LABEL = "约 124 MB"
@@ -111,7 +163,9 @@ class VitsModelManager(
         internal const val KEY_ERROR = "error"
         internal const val KEY_MODEL_ID = "model_id"
         private const val PREFERENCES_NAME = "vits_model"
-        private const val KEY_SWITCH_AFTER_DOWNLOAD = "switch_after_download"
+        private const val KEY_PENDING_MODEL_ID = "pending_vits_model_id"
+        private const val KEY_LEGACY_SWITCH_AFTER_DOWNLOAD = "switch_after_download"
+        private const val KEY_LEGACY_SWITCH_PREFIX_SEP = "switch_after_download-"
 
         fun modelDir(context: Context): File = modelDir(context, VitsModelRegistry.WNJ)
 
@@ -120,9 +174,31 @@ class VitsModelManager(
 
         fun isReady(context: Context): Boolean = isReady(context, VitsModelRegistry.WNJ)
 
+        /**
+         * Fast, non-blocking readiness check used by the UI, WorkManager Flow
+         * and TTS service. It only verifies that the ready marker exists, that
+         * it carries the descriptor's pinned [VitsModelDescriptor.revision], and
+         * that every expected file is present with the expected size. Full
+         * SHA-256 verification is performed by [VitsModelDownloadWorker] before
+         * the marker is written, so a present marker with a matching revision
+         * implies the files were hash-verified at download time.
+         */
         fun isReady(context: Context, descriptor: VitsModelDescriptor): Boolean =
-            File(modelDir(context, descriptor), descriptor.readyMarkerName).isFile &&
-                verifyFilesInDir(modelDir(context, descriptor), descriptor.specs).all { it.valid }
+            isReadyFast(modelDir(context, descriptor), descriptor)
+
+        internal fun isReadyFast(context: Context, descriptor: VitsModelDescriptor): Boolean =
+            isReadyFast(modelDir(context, descriptor), descriptor)
+
+        internal fun isReadyFast(dir: File, descriptor: VitsModelDescriptor): Boolean {
+            val marker = File(dir, descriptor.readyMarkerName)
+            if (!marker.isFile) return false
+            val markerRevision = runCatching { marker.readText().trim() }.getOrNull()
+            if (markerRevision != descriptor.revision) return false
+            return descriptor.specs.all { spec ->
+                val file = File(dir, spec.name)
+                file.isFile && file.length() == spec.size
+            }
+        }
 
         fun modelFile(context: Context): File =
             File(modelDir(context), VitsModelRegistry.WNJ.onnxFileName)
@@ -140,6 +216,10 @@ class VitsModelManager(
         internal fun readyFile(context: Context, descriptor: VitsModelDescriptor): File =
             File(modelDir(context, descriptor), descriptor.readyMarkerName)
 
+        /**
+         * Full SHA-256 verification. Expensive — must only be called from
+         * `Dispatchers.IO` (i.e. inside [VitsModelDownloadWorker]).
+         */
         internal fun verifyModelFiles(context: Context): List<ModelFileStatus> =
             verifyFilesInDir(modelDir(context), VitsModelRegistry.WNJ.specs)
 
@@ -168,6 +248,9 @@ class VitsModelManager(
             }
             return digest.digest().joinToString("") { "%02x".format(it) }
         }
+
+        internal fun pendingSwitchTarget(preferences: android.content.SharedPreferences): VitsModelId? =
+            VitsModelId.fromStableValue(preferences.getString(KEY_PENDING_MODEL_ID, null))
     }
 }
 

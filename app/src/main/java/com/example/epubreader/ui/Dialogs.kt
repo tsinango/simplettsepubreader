@@ -206,7 +206,7 @@ private fun VitsModelSection(
             TextButton(onClick = onDelete) {
                 Text(context.getString(R.string.delete_model_label, descriptor.sizeLabel))
             }
-            if (selected) {
+            if (selected && performance.modelId == descriptor.id.stableValue) {
                 Text(
                     "当前：CPU / ${performance.cpuThreads} 线程" +
                         if (performance.realTimeFactor > 0f) {

@@ -13,6 +13,10 @@ import android.os.Build
 class TtsPerformanceStore(context: Context) {
     private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
 
+    init {
+        migrateLegacyMetrics()
+    }
+
     fun cpuThreads(): Int {
         val savedProfile = preferences.getString(KEY_PROFILE, null)
         if (savedProfile == deviceProfile) return preferences.getInt(KEY_CPU_THREADS, defaultCpuThreads())
@@ -58,6 +62,38 @@ class TtsPerformanceStore(context: Context) {
 
     private fun defaultCpuThreads(): Int =
         Runtime.getRuntime().availableProcessors().coerceIn(MIN_CPU_THREADS, MAX_CPU_THREADS)
+
+    /**
+     * One-time migration of pre-multi-model metrics. Older versions stored a
+     * single WNJ profile under unsuffixed keys; copy those into the WNJ
+     * revision-suffixed keys so legacy RTF data is not lost on upgrade.
+     */
+    private fun migrateLegacyMetrics() {
+        val wnjRevision = VitsModelRegistry.WNJ.revision
+        val keys = listOf(
+            KEY_ENGINE_INIT_MS, KEY_FIRST_AUDIO_MS, KEY_GENERATION_MS,
+            KEY_RTF, KEY_PREFETCH_HIT_RATE, KEY_GAP_MS,
+        )
+        val editor = preferences.edit()
+        var changed = false
+        keys.forEach { base ->
+            val legacyKey = base
+            val newKey = metricKey(base, wnjRevision)
+            if (preferences.contains(newKey)) return@forEach
+            if (!preferences.contains(legacyKey)) return@forEach
+            when (base) {
+                KEY_RTF, KEY_PREFETCH_HIT_RATE -> {
+                    editor.putFloat(newKey, preferences.getFloat(legacyKey, 0f))
+                }
+                else -> {
+                    editor.putLong(newKey, preferences.getLong(legacyKey, 0L))
+                }
+            }
+            editor.remove(legacyKey)
+            changed = true
+        }
+        if (changed) editor.apply()
+    }
 
     companion object {
         private const val PREFERENCES_NAME = "tts_performance"

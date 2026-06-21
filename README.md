@@ -46,7 +46,7 @@ TTS_READER_KEY_PASSWORD
 
 | 模型 | 来源 | 下载体积 | 说话人 | 许可证 | 限制 |
 | --- | --- | --- | --- | --- | --- |
-| 内置 VITS（WNJ） | `csukuangfj/vits-zh-hf-fanchen-wnj` | 约 124 MB | 中文女声，单说话人 | Apache-2.0（sherpa-onnx） | 仅支持中文 |
+| 内置 VITS（WNJ） | `csukuangfj/vits-zh-hf-fanchen-wnj` | 约 124 MB | 中文男声，单说话人 | Apache-2.0（sherpa-onnx） | 仅支持中文 |
 | MeloTTS 中英双语 | `csukuangfj/vits-melo-tts-zh_en` | 约 170 MB | 中英双语女声，单说话人 | MIT（MyShell.ai MeloTTS） | 英文仅保证词典中已有词汇；非词典词可能发音异常 |
 
 两个模型都使用固定的 Hugging Face revision 下载并在落盘前逐文件校验大小与 SHA-256：

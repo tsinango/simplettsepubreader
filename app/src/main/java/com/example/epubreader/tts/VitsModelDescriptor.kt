@@ -70,7 +70,7 @@ data class VitsModelDescriptor(
 
 object VitsModelRegistry {
     /**
-     * WNJ Chinese single-speaker female voice. The directory, ready marker and
+     * WNJ Chinese single-speaker male voice. The directory, ready marker and
      * work name intentionally match the pre-multi-model implementation so that
      * existing installations keep reporting ready without a re-download.
      */
@@ -95,7 +95,7 @@ object VitsModelRegistry {
             ModelFileSpec("date.fst", 59_154L, "eb8aa079ae3cb81d8f4404992f39d61a0cb990947512b5b8d1e54d1f6980e718"),
             ModelFileSpec("number.fst", 64_482L, "743f402181fcfebf76cc2f0546b71fa26476e626fbe4e460fb7b4c3a7a8bd5bd"),
         ),
-        description = "约 124 MB，中文女声，单说话人；仅支持中文。",
+        description = "约 124 MB，中文男声，单说话人；仅支持中文。",
     )
 
     /**

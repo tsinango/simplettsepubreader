@@ -211,4 +211,79 @@ class VitsModelDescriptorTest {
             assertFalse(status.valid)
         }
     }
+
+    // ---- Fast readiness (issue 1) ----
+
+    private fun meloDirWithSizes(): File {
+        val dir = File(tempDir, VitsModelRegistry.MELO.dirName).apply { mkdirs() }
+        VitsModelRegistry.MELO.specs.forEach { spec ->
+            File(dir, spec.name).writeBytes(ByteArray(spec.size.toInt()))
+        }
+        return dir
+    }
+
+    @Test
+    fun fastReadyIsTrueWhenMarkerRevisionAndSizesMatch() {
+        val dir = meloDirWithSizes()
+        File(dir, VitsModelRegistry.MELO.readyMarkerName).writeText(VitsModelRegistry.MELO.revision)
+        assertTrue(VitsModelManager.isReadyFast(dir, VitsModelRegistry.MELO))
+    }
+
+    @Test
+    fun fastReadyIsFalseWhenMarkerMissing() {
+        val dir = meloDirWithSizes()
+        assertFalse(VitsModelManager.isReadyFast(dir, VitsModelRegistry.MELO))
+    }
+
+    @Test
+    fun fastReadyIsFalseWhenMarkerRevisionMismatches() {
+        val dir = meloDirWithSizes()
+        File(dir, VitsModelRegistry.MELO.readyMarkerName).writeText("wrong-revision")
+        assertFalse(VitsModelManager.isReadyFast(dir, VitsModelRegistry.MELO))
+    }
+
+    @Test
+    fun fastReadyIsFalseWhenFileMissing() {
+        val dir = meloDirWithSizes()
+        File(dir, VitsModelRegistry.MELO.readyMarkerName).writeText(VitsModelRegistry.MELO.revision)
+        File(dir, "model.onnx").delete()
+        assertFalse(VitsModelManager.isReadyFast(dir, VitsModelRegistry.MELO))
+    }
+
+    @Test
+    fun fastReadyIsFalseWhenFileSizeMismatch() {
+        val dir = meloDirWithSizes()
+        File(dir, VitsModelRegistry.MELO.readyMarkerName).writeText(VitsModelRegistry.MELO.revision)
+        File(dir, "tokens.txt").writeBytes(ByteArray(1))
+        assertFalse(VitsModelManager.isReadyFast(dir, VitsModelRegistry.MELO))
+    }
+
+    @Test
+    fun fastReadyDoesNotReadFileContents() {
+        // Same-size but wrong-content files must still pass the FAST check,
+        // because full SHA-256 is the worker's responsibility. This documents
+        // the intentional split between fast readiness and full verification.
+        val dir = meloDirWithSizes()
+        File(dir, VitsModelRegistry.MELO.readyMarkerName).writeText(VitsModelRegistry.MELO.revision)
+        assertTrue(VitsModelManager.isReadyFast(dir, VitsModelRegistry.MELO))
+    }
+
+    @Test
+    fun fullVerificationStillDetectsSameSizeCorruptContent() {
+        val dir = meloDirWithSizes()
+        val statuses = VitsModelManager.verifyFilesInDir(dir, VitsModelRegistry.MELO.specs)
+        assertTrue("full SHA-256 must reject same-size corrupt files", statuses.all { !it.valid })
+    }
+
+    @Test
+    fun fastReadyIsolatedPerModelDirectory() {
+        val wnjDir = File(tempDir, VitsModelRegistry.WNJ.dirName).apply { mkdirs() }
+        VitsModelRegistry.WNJ.specs.forEach { spec ->
+            File(wnjDir, spec.name).writeBytes(ByteArray(spec.size.toInt()))
+        }
+        File(wnjDir, VitsModelRegistry.WNJ.readyMarkerName).writeText(VitsModelRegistry.WNJ.revision)
+        assertTrue(VitsModelManager.isReadyFast(wnjDir, VitsModelRegistry.WNJ))
+        val meloDir = File(tempDir, VitsModelRegistry.MELO.dirName).apply { mkdirs() }
+        assertFalse(VitsModelManager.isReadyFast(meloDir, VitsModelRegistry.MELO))
+    }
 }

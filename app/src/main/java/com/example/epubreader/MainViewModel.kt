@@ -102,7 +102,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ttsPerformanceStore.snapshot(VitsModelRegistry.WNJ.revision, VitsModelRegistry.WNJ.id.stableValue),
     )
     val ttsPerformance: StateFlow<TtsPerformanceSnapshot> = _ttsPerformance
-
     private val _reader = MutableStateFlow(ReaderUiState())
     val reader: StateFlow<ReaderUiState> = _reader
 
@@ -161,18 +160,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             vitsModelStates.collect { states ->
-                VitsModelRegistry.all.forEach { descriptor ->
-                    val manager = modelManagers.getValue(descriptor.id)
-                    if (manager.shouldSwitchAfterDownload() &&
-                        states[descriptor.id]?.status == VitsModelStatus.READY
-                    ) {
-                        manager.clearSwitchAfterDownload()
-                        val value = settings.value ?: ReaderSettingsEntity()
-                        repository.saveSettings(
-                            value.copy(ttsEngine = TTS_ENGINE_VITS, vitsModelId = descriptor.id.stableValue),
-                        )
-                    }
+                val pendingId = modelManagers.values.firstNotNullOfOrNull { it.pendingSwitchTarget() }
+                if (pendingId == null) return@collect
+                val pendingDescriptor = VitsModelRegistry.byId(pendingId)
+                val pendingManager = modelManagers.getValue(pendingId)
+                if (states[pendingId]?.status == VitsModelStatus.READY) {
+                    pendingManager.clearPendingSwitch()
+                    val value = settings.value ?: ReaderSettingsEntity()
+                    repository.saveSettings(
+                        value.copy(ttsEngine = TTS_ENGINE_VITS, vitsModelId = pendingDescriptor.id.stableValue),
+                    )
                 }
+            }
+        }
+        viewModelScope.launch {
+            settings.collect { s ->
+                val modelId = VitsModelId.fromStableValue(s?.vitsModelId) ?: VitsModelId.FANCHEN_WNJ
+                val descriptor = VitsModelRegistry.byId(modelId)
+                _ttsPerformance.value =
+                    ttsPerformanceStore.snapshot(descriptor.revision, descriptor.id.stableValue)
             }
         }
 
@@ -413,7 +419,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun useSystemTts() {
-        modelManagers.values.forEach { it.clearSwitchAfterDownload() }
+        modelManagers.values.forEach { it.clearPendingSwitch() }
         updateSettings((settings.value ?: ReaderSettingsEntity()).copy(ttsEngine = TTS_ENGINE_SYSTEM))
     }
 
@@ -421,7 +427,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val manager = modelManagers.getValue(id)
         val descriptor = VitsModelRegistry.byId(id)
         if (VitsModelManager.isReady(getApplication(), descriptor)) {
-            manager.clearSwitchAfterDownload()
+            manager.clearPendingSwitch()
             updateSettings(
                 (settings.value ?: ReaderSettingsEntity()).copy(
                     ttsEngine = TTS_ENGINE_VITS,
@@ -429,6 +435,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 ),
             )
         } else {
+            // requestSwitchAfterDownload overwrites the single shared pending
+            // id, so the latest model choice always wins over any prior one.
             manager.requestSwitchAfterDownload()
             manager.download()
         }
@@ -436,13 +444,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun cancelVitsDownload(id: VitsModelId) {
         val manager = modelManagers.getValue(id)
-        manager.clearSwitchAfterDownload()
+        manager.clearPendingSwitch(id)
         manager.cancel()
     }
 
     fun deleteVitsModel(id: VitsModelId) {
         val manager = modelManagers.getValue(id)
-        manager.clearSwitchAfterDownload()
+        manager.clearPendingSwitch(id)
         val current = settings.value
         if (current?.ttsEngine == TTS_ENGINE_VITS && current.vitsModelId == id.stableValue) {
             useSystemTts()
