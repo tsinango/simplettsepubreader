@@ -97,6 +97,9 @@ interface TtsModelPackDescriptor {
     /** Speakers exposed by the pack, or null for single-speaker models. */
     val speakerMetadata: List<SpeakerEntry>?
 
+    /** Minimum number of entries the manifest (or specs list) must contain. */
+    val minManifestEntryCount: Int get() = 1
+
     /** All files that must exist on disk for the pack to be ready. */
     val specs: List<ModelFileSpec>
 

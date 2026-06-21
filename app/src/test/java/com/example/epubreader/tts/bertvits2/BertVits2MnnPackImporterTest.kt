@@ -27,18 +27,19 @@ class BertVits2MnnPackImporterTest {
 
     @Before
     fun before() {
-        cleanPack()
+        cleanPackBackups()
     }
 
     @After
     fun after() {
-        cleanPack()
+        cleanPackBackups()
     }
 
-    private fun cleanPack() {
+    private fun cleanPackBackups() {
         val dir = java.io.File(context.filesDir, descriptor.dirName)
         dir.deleteRecursively()
         java.io.File(dir.parentFile, "${dir.name}.installing").deleteRecursively()
+        java.io.File(dir.parentFile, "${dir.name}.backup").deleteRecursively()
     }
 
     @Test
@@ -47,20 +48,22 @@ class BertVits2MnnPackImporterTest {
             files = listOf(
                 ManifestFile("bert/deberta.mnn", "hello".toByteArray()),
                 ManifestFile("bv2/G_0.mnn", "world".toByteArray()),
+                ManifestFile("tokenizer/tokenizer.json", """{"vocab":[]}""".toByteArray()),
             ),
         )
         val importer = BertVits2MnnPackImporter(context, descriptor)
-        val manifest = importer.install(zip) // throws on failure
+        val manifest = importer.install(zip)
         assertEquals(descriptor.revision, manifest.revision)
-        assertEquals(2, manifest.files.size)
+        assertEquals(3, manifest.files.size)
         val packDir = java.io.File(context.filesDir, descriptor.dirName)
         assertTrue(packDir.isDirectory)
         assertTrue(java.io.File(packDir, descriptor.readyMarkerName).isFile)
         assertTrue(java.io.File(packDir, "bert/deberta.mnn").isFile)
         assertTrue(java.io.File(packDir, "bv2/G_0.mnn").isFile)
+        assertTrue(java.io.File(packDir, "tokenizer/tokenizer.json").isFile)
         assertTrue(VitsModelManager.isReady(context, descriptor))
-        // No staging dir leaks behind a successful install.
         assertFalse(java.io.File(packDir.parentFile, "${packDir.name}.installing").exists())
+        assertFalse(java.io.File(packDir.parentFile, "${packDir.name}.backup").exists())
     }
 
     @Test
@@ -75,7 +78,7 @@ class BertVits2MnnPackImporterTest {
         try {
             BertVits2MnnPackImporter(context, descriptor).install(ByteArrayInputStream(ba.toByteArray()))
             fail("expected ImportException for traversal entry")
-        } catch (e: BertVits2MnnPackImporter.ImportException) {
+        } catch (_: BertVits2MnnPackImporter.ImportException) {
             // expected
         }
         val packDir = java.io.File(context.filesDir, descriptor.dirName)
@@ -103,7 +106,11 @@ class BertVits2MnnPackImporterTest {
     @Test
     fun manifestVersionMismatchIsRejected() {
         val zip = zipWithManifest(
-            files = listOf(ManifestFile("a.txt", "x".toByteArray())),
+            files = listOf(
+                ManifestFile("a.mnn", "x".toByteArray()),
+                ManifestFile("b.mnn", "y".toByteArray()),
+                ManifestFile("c.json", "{}".toByteArray()),
+            ),
             revision = "wrong-rev",
         )
         try {
@@ -117,10 +124,13 @@ class BertVits2MnnPackImporterTest {
     @Test
     fun sizeMismatchIsRejectedAfterExtraction() {
         val zip = zipWithManifest(
-            files = listOf(ManifestFile("a.txt", "x".toByteArray())),
-            // claim twice the actual byte count
-            overrideSizes = mapOf("a.txt" to 2L),
-            overrideHashes = mapOf("a.txt" to ""),
+            files = listOf(
+                ManifestFile("a.mnn", "x".toByteArray()),
+                ManifestFile("b.mnn", "y".toByteArray()),
+                ManifestFile("target.txt", "zzz".toByteArray()),
+            ),
+            overrideSizes = mapOf("target.txt" to 5L),
+            overrideHashes = mapOf("target.txt" to ""),
         )
         try {
             BertVits2MnnPackImporter(context, descriptor).install(zip)
@@ -133,8 +143,12 @@ class BertVits2MnnPackImporterTest {
     @Test
     fun hashMismatchIsRejected() {
         val zip = zipWithManifest(
-            files = listOf(ManifestFile("a.txt", "hello".toByteArray())),
-            overrideHashes = mapOf("a.txt" to "00".repeat(32)),
+            files = listOf(
+                ManifestFile("a.mnn", "x".toByteArray()),
+                ManifestFile("b.mnn", "y".toByteArray()),
+                ManifestFile("target.txt", "hello".toByteArray()),
+            ),
+            overrideHashes = mapOf("target.txt" to "00".repeat(32)),
         )
         try {
             BertVits2MnnPackImporter(context, descriptor).install(zip)
@@ -148,16 +162,24 @@ class BertVits2MnnPackImporterTest {
     fun unexpectedExtraZipEntriesAreRejected() {
         val ba = ByteArrayOutputStream()
         ZipOutputStream(ba).use { zos ->
-            zos.putNextEntry(ZipEntry("a.txt"))
-            zos.write("hello".toByteArray())
+            zos.putNextEntry(ZipEntry("a.mnn"))
+            zos.write("x".toByteArray())
+            zos.closeEntry()
+            zos.putNextEntry(ZipEntry("b.mnn"))
+            zos.write("y".toByteArray())
+            zos.closeEntry()
+            zos.putNextEntry(ZipEntry("c.mnn"))
+            zos.write("z".toByteArray())
             zos.closeEntry()
             zos.putNextEntry(ZipEntry("stranger.txt"))
-            zos.write("z".toByteArray())
+            zos.write("evil".toByteArray())
             zos.closeEntry()
             writeManifest(
                 zos,
                 files = listOf(
-                    ManifestFile("a.txt", "hello".toByteArray()),
+                    ManifestFile("a.mnn", "x".toByteArray()),
+                    ManifestFile("b.mnn", "y".toByteArray()),
+                    ManifestFile("c.mnn", "z".toByteArray()),
                 ),
             )
         }
@@ -173,21 +195,25 @@ class BertVits2MnnPackImporterTest {
     fun missingManifestEntryIsRejected() {
         val ba = ByteArrayOutputStream()
         ZipOutputStream(ba).use { zos ->
-            zos.putNextEntry(ZipEntry("a.txt"))
-            zos.write("hello".toByteArray())
+            zos.putNextEntry(ZipEntry("a.mnn"))
+            zos.write("x".toByteArray())
             zos.closeEntry()
-            // Manifest lists a missing b.txt
+            zos.putNextEntry(ZipEntry("b.mnn"))
+            zos.write("y".toByteArray())
+            zos.closeEntry()
+            // Manifest lists a.mnn, b.mnn, c.mnn but c.mnn is not in the zip
             writeManifest(
                 zos,
                 files = listOf(
-                    ManifestFile("a.txt", "hello".toByteArray()),
-                    ManifestFile("b.txt", "world".toByteArray()),
+                    ManifestFile("a.mnn", "x".toByteArray()),
+                    ManifestFile("b.mnn", "y".toByteArray()),
+                    ManifestFile("c.mnn", "z".toByteArray()),
                 ),
             )
         }
         try {
             BertVits2MnnPackImporter(context, descriptor).install(ByteArrayInputStream(ba.toByteArray()))
-            fail("expected ImportException due to missing entry b.txt")
+            fail("expected ImportException due to missing entry")
         } catch (_: BertVits2MnnPackImporter.ImportException) {
             // expected
         }
@@ -195,10 +221,13 @@ class BertVits2MnnPackImporterTest {
 
     @Test
     fun blankSha256IsSkippedSizeStillVerified() {
-        val data = "hello-bv2".toByteArray()
         val zip = zipWithManifest(
-            files = listOf(ManifestFile("a.txt", data)),
-            overrideHashes = mapOf("a.txt" to ""),
+            files = listOf(
+                ManifestFile("a.mnn", "hello-bv2".toByteArray()),
+                ManifestFile("b.mnn", "world".toByteArray()),
+                ManifestFile("c.json", "{}".toByteArray()),
+            ),
+            overrideHashes = mapOf("a.mnn" to ""),
         )
         BertVits2MnnPackImporter(context, descriptor).install(zip)
         assertTrue(VitsModelManager.isReady(context, descriptor))
@@ -207,13 +236,106 @@ class BertVits2MnnPackImporterTest {
     @Test
     fun importerStreamsZipInputStreamDirectlyWithoutMaterialisingToDisk() {
         val zip = zipWithManifest(
-            files = listOf(ManifestFile("greetings.txt", "你好".toByteArray(Charsets.UTF_8))),
+            files = listOf(
+                ManifestFile("a.mnn", "hello".toByteArray()),
+                ManifestFile("b.mnn", "world".toByteArray()),
+                ManifestFile("greetings.txt", "你好".toByteArray(Charsets.UTF_8)),
+            ),
         )
-        // Mark the stream by using a wrapped stream: importer reads once
-        // sequentially. Ensure we don't accidentally require random access.
         val bytes = ByteStreams.toByteArray(zip)
         BertVits2MnnPackImporter(context, descriptor).install(ByteArrayInputStream(bytes))
         assertTrue(VitsModelManager.isReady(context, descriptor))
+    }
+
+    @Test
+    fun emptyManifestIsRejected() {
+        val zip = zipWithManifest(files = emptyList())
+        try {
+            BertVits2MnnPackImporter(context, descriptor).install(zip)
+            fail("expected ImportException for empty manifest")
+        } catch (_: BertVits2MnnPackImporter.ImportException) {
+            // expected
+        }
+    }
+
+    @Test
+    fun existingPackIsPreservedOnImportFailure() {
+        // First install a valid pack.
+        val goodZip = zipWithManifest(
+            files = listOf(
+                ManifestFile("good.mnn", "good".toByteArray()),
+                ManifestFile("good2.mnn", "data".toByteArray()),
+                ManifestFile("good3.mnn", "info".toByteArray()),
+            ),
+        )
+        val importer = BertVits2MnnPackImporter(context, descriptor)
+        importer.install(goodZip)
+        val packDir = java.io.File(context.filesDir, descriptor.dirName)
+        assertTrue(java.io.File(packDir, "good.mnn").isFile)
+
+        // Now attempt a bad import — it should fail and leave the original intact.
+        val badZip = zipWithManifest(
+            files = listOf(
+                ManifestFile("a.mnn", "x".toByteArray()),
+                ManifestFile("b.mnn", "y".toByteArray()),
+                ManifestFile("c.mnn", "z".toByteArray()),
+            ),
+            overrideSizes = mapOf("c.mnn" to 999L),
+            overrideHashes = mapOf("c.mnn" to ""),
+        )
+        try {
+            BertVits2MnnPackImporter(context, descriptor).install(badZip)
+            fail("expected ImportException for size mismatch")
+        } catch (_: BertVits2MnnPackImporter.ImportException) {
+            // expected
+        }
+        // Original pack must still be intact and READY.
+        assertTrue(packDir.isDirectory)
+        assertTrue(java.io.File(packDir, "good.mnn").isFile)
+        assertTrue(VitsModelManager.isReady(context, descriptor))
+        assertFalse(java.io.File(packDir.parentFile, "${packDir.name}.backup").exists())
+    }
+
+    @Test
+    fun successfulImportWithoutExistingPackHasNoBackup() {
+        val zip = zipWithManifest(
+            files = listOf(
+                ManifestFile("a.mnn", "data".toByteArray()),
+                ManifestFile("b.mnn", "more".toByteArray()),
+                ManifestFile("c.json", "{}".toByteArray()),
+            ),
+        )
+        BertVits2MnnPackImporter(context, descriptor).install(zip)
+        val packDir = java.io.File(context.filesDir, descriptor.dirName)
+        assertTrue(VitsModelManager.isReady(context, descriptor))
+        assertFalse(java.io.File(packDir.parentFile, "${packDir.name}.backup").exists())
+    }
+
+    @Test
+    fun singleEntryManifestIsRejected() {
+        val zip = zipWithManifest(files = listOf(ManifestFile("only.mnn", "x".toByteArray())))
+        try {
+            BertVits2MnnPackImporter(context, descriptor).install(zip)
+            fail("expected ImportException for below-minimum manifest entries")
+        } catch (_: BertVits2MnnPackImporter.ImportException) {
+            // expected
+        }
+    }
+
+    @Test
+    fun twoEntryManifestIsRejected() {
+        val zip = zipWithManifest(
+            files = listOf(
+                ManifestFile("a.mnn", "x".toByteArray()),
+                ManifestFile("b.mnn", "y".toByteArray()),
+            ),
+        )
+        try {
+            BertVits2MnnPackImporter(context, descriptor).install(zip)
+            fail("expected ImportException for below-minimum manifest entries")
+        } catch (_: BertVits2MnnPackImporter.ImportException) {
+            // expected
+        }
     }
 
     private data class ManifestFile(val path: String, val bytes: ByteArray)

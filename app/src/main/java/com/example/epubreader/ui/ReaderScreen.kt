@@ -276,6 +276,12 @@ fun ReaderScreen(
             onUseVitsModel = vm::useVitsModel,
             onCancelVitsDownload = vm::cancelVitsDownload,
             onDeleteVitsModel = vm::deleteVitsModel,
+            getEmbeddedSpeakerId = { id ->
+                vm.embeddedSelectionStore.speakerId(id.stableValue, 0)
+            },
+            getEmbeddedRate = { id ->
+                vm.embeddedSelectionStore.rate(id.stableValue, 1f)
+            },
             onSetEmbeddedSpeakerId = vm::setEmbeddedSpeakerId,
             onSetEmbeddedRate = vm::setEmbeddedRate,
             onImportPack = { id ->

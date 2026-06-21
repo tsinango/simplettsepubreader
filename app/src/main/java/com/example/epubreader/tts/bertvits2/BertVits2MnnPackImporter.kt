@@ -54,6 +54,12 @@ class BertVits2MnnPackImporter(
     /** Reads [zipStream] and installs the pack, returning the manifest it used. */
     fun install(zipStream: InputStream): Manifest = runBlockingImport {
         val packRoot = VitsModelManager.modelDir(context, descriptor)
+        // Save an existing pack so we can restore it if the import fails.
+        val backup = File(packRoot.parentFile, "${packRoot.name}.backup")
+        if (packRoot.isDirectory) {
+            backup.deleteRecursively()
+            check(packRoot.renameTo(backup)) { "backup existing pack failed" }
+        }
         val staging = File(packRoot.parentFile, "${packRoot.name}.installing")
         staging.deleteRecursively()
         staging.mkdirs()
@@ -62,6 +68,12 @@ class BertVits2MnnPackImporter(
             if (!manifest.revision.equals(descriptor.revision, ignoreCase = true)) {
                 throw ImportException(
                     "manifest revision ${manifest.revision} != pack ${descriptor.revision}",
+                )
+            }
+            if (manifest.files.size < descriptor.minManifestEntryCount) {
+                throw ImportException(
+                    "manifest declares ${manifest.files.size} files, " +
+                        "minimum is ${descriptor.minManifestEntryCount}",
                 )
             }
             val stagedFiles = staging.walk()
@@ -97,12 +109,13 @@ class BertVits2MnnPackImporter(
             if (issues.isNotEmpty()) {
                 throw ImportException("manifest validation failed: ${issues.joinToString("; ")}")
             }
-            packRoot.deleteRecursively()
             check(staging.renameTo(packRoot)) { "rename staging into pack root failed" }
             val marker = File(packRoot, descriptor.readyMarkerName)
             val markerPart = File(packRoot, "${descriptor.readyMarkerName}.part")
             markerPart.writeText(descriptor.revision)
             check(markerPart.renameTo(marker)) { "writing ready marker failed" }
+            // Commit succeeded — discard the backup.
+            backup.deleteRecursively()
             DiagnosticLogger.event(
                 "BV2_IMPORT",
                 "ok model=${descriptor.id.stableValue} " +
@@ -110,11 +123,13 @@ class BertVits2MnnPackImporter(
             )
             manifest
         } catch (e: Throwable) {
+            // Atomically: discard the failed staging, restore backup if one
+            // exists, then throw. Never leave a half-written pack or no pack
+            // when a valid pack was present before the import.
             staging.deleteRecursively()
             packRoot.deleteRecursively()
-            // best-effort: do not leave a stale READY behind
-            File(packRoot.parentFile, "${packRoot.name}").let { p ->
-                File(p, descriptor.readyMarkerName).delete()
+            if (backup.isDirectory) {
+                check(backup.renameTo(packRoot)) { "restore backup after failed import" }
             }
             throw e
         }

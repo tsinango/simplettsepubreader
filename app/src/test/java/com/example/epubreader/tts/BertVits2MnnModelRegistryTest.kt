@@ -33,6 +33,7 @@ class BertVits2MnnModelRegistryTest {
         assertEquals(".ready-bv2-22k-v1", pack.readyMarkerName)
         assertEquals(22_050, pack.sampleRate)
         assertEquals("bv2-pack-manifest.json", pack.manifestFileName)
+        assertEquals(3, pack.minManifestEntryCount)
         assertTrue(
             "license mentions Apache and non-commercial combination",
             pack.license.contains("Apache"),

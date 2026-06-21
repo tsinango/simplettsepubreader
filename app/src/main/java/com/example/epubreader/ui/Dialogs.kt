@@ -47,6 +47,8 @@ fun SettingsDialog(
     onUseVitsModel: (VitsModelId) -> Unit,
     onCancelVitsDownload: (VitsModelId) -> Unit,
     onDeleteVitsModel: (VitsModelId) -> Unit,
+    getEmbeddedSpeakerId: (VitsModelId) -> Int,
+    getEmbeddedRate: (VitsModelId) -> Float,
     onSetEmbeddedSpeakerId: (VitsModelId, Int) -> Unit,
     onSetEmbeddedRate: (VitsModelId, Float) -> Unit,
     onImportPack: (VitsModelId) -> Unit,
@@ -92,6 +94,8 @@ fun SettingsDialog(
                         selected = value.ttsEngine == MainViewModel.TTS_ENGINE_VITS &&
                             value.vitsModelId == descriptor.id.stableValue,
                         performance = performance,
+                        currentSid = getEmbeddedSpeakerId(descriptor.id),
+                        currentRate = getEmbeddedRate(descriptor.id),
                         onSelectAttempt = {
                             val st = modelStates[descriptor.id]?.status ?: VitsModelStatus.NOT_DOWNLOADED
                             if (st == VitsModelStatus.READY) {
@@ -191,6 +195,7 @@ fun SettingsDialog(
         val zhSpeakers = speakers.filter { it.language == "ZH" }
         KokoroSpeakerPicker(
             speakers = zhSpeakers,
+            currentSid = getEmbeddedSpeakerId(id),
             onPick = { sid ->
                 onSetEmbeddedSpeakerId(id, sid)
                 kokoroSpeakerPickerForId = null
@@ -219,11 +224,13 @@ private fun EmbeddedModelSection(
     state: VitsModelState,
     selected: Boolean,
     performance: TtsPerformanceSnapshot,
+    currentSid: Int,
+    currentRate: Float,
     onSelectAttempt: () -> Unit,
     onDownload: () -> Unit,
     onCancel: () -> Unit,
     onDelete: () -> Unit,
-onSetSpeakerId: (Int) -> Unit,
+    onSetSpeakerId: (Int) -> Unit,
     setRate: (Float) -> Unit,
     onPickSpeaker: () -> Unit,
     onImportPack: () -> Unit,
@@ -250,6 +257,8 @@ onSetSpeakerId: (Int) -> Unit,
             if (descriptor.engineKind == TtsEngineKind.SHERPA_KOKORO && selected) {
                 KokoroSelectionUi(
                     speakers = descriptor.speakerMetadata.orEmpty(),
+                    currentSid = currentSid,
+                    currentRate = currentRate,
                     setSpeakerId = onSetSpeakerId,
                     setRate = setRate,
                     onPickSpeaker = onPickSpeaker,
@@ -291,11 +300,13 @@ onSetSpeakerId: (Int) -> Unit,
 @Composable
 private fun KokoroSelectionUi(
     speakers: List<SpeakerEntry>,
+    currentSid: Int,
+    currentRate: Float,
     setSpeakerId: (Int) -> Unit,
     setRate: (Float) -> Unit,
     onPickSpeaker: () -> Unit,
 ) {
-    var rate by remember { mutableStateOf(KokoroModelRegistry.DEFAULT_USER_RATE) }
+    var rate by remember(currentRate) { mutableStateOf(currentRate) }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         TextButton(onClick = onPickSpeaker) { Text("中文说话人选择…") }
         Text("Kokoro 速度 ${"%.1f".format(rate)}x")
@@ -306,6 +317,7 @@ private fun KokoroSelectionUi(
 @Composable
 private fun KokoroSpeakerPicker(
     speakers: List<SpeakerEntry>,
+    currentSid: Int,
     onPick: (Int) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -318,7 +330,10 @@ private fun KokoroSpeakerPicker(
                     Text("女声（${speakers.count { it.gender == SpeakerGender.FEMALE }}）", fontWeight = FontWeight.Bold)
                     speakers.filter { it.gender == SpeakerGender.FEMALE }.forEach { s ->
                         TextButton(onClick = { onPick(s.id) }) {
-                            Text("${s.id}: ${s.name}")
+                            Text(
+                                if (s.id == currentSid) "✓ ${s.id}: ${s.name}"
+                                else "${s.id}: ${s.name}",
+                            )
                         }
                     }
                 }
@@ -326,7 +341,10 @@ private fun KokoroSpeakerPicker(
                     Text("男声（${speakers.count { it.gender == SpeakerGender.MALE }}）", fontWeight = FontWeight.Bold)
                     speakers.filter { it.gender == SpeakerGender.MALE }.forEach { s ->
                         TextButton(onClick = { onPick(s.id) }) {
-                            Text("${s.id}: ${s.name}")
+                            Text(
+                                if (s.id == currentSid) "✓ ${s.id}: ${s.name}"
+                                else "${s.id}: ${s.name}",
+                            )
                         }
                     }
                 }

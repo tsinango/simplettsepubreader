@@ -43,6 +43,7 @@ data class BertVits2MnnPackDescriptor(
     override val sampleRate: Int,
     override val speakerMetadata: List<SpeakerEntry>?,
     override val specs: List<ModelFileSpec> = emptyList(),
+    override val minManifestEntryCount: Int = 3,
     /**
      * Stable name of the manifest file the importer writes into the pack
      * directory after successful verification. Used by the fast readiness
