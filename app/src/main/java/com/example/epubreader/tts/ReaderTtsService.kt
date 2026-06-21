@@ -483,13 +483,10 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                 sid = 0,
             )
             val generated = withContext(Dispatchers.Default) {
-                val job = coroutineContext[Job]
-                engine.generateWithConfigAndCallback(
+                engine.generateWithConfig(
                     chunk.text,
                     genConfig,
-                ) {
-                    if (job?.isActive == true && isGenerationCurrent(serial)) 1 else 0
-                }
+                )
             }
             if (!isGenerationCurrent(serial) || generated.samples.isEmpty()) return@withLock null
             val silenceSamples = chunk.pauseMs * generated.sampleRate / 1000
