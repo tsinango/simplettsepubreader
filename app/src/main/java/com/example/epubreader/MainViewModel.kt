@@ -204,6 +204,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         _readerPosition.value = next
         updateBookProgressFromPosition(next)
+        persistCurrent("UI")
     }
 
     fun visibleSentence(sentence: SentenceRef) {
