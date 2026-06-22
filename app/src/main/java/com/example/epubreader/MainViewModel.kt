@@ -428,10 +428,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun useVitsModel(id: VitsModelId) {
-        // Bert-VITS2-MNN is import-only (no stable HTTP URL); never enqueue the
-        // generic download worker for it. Its selection is wired through
-        // importBertVits2MnnPack instead.
-        if (id == VitsModelId.BERT_VITS2_MNN_22K) return
         val manager = modelManagers.getValue(id)
         val descriptor = EmbeddedModelRegistry.byId(id)
         if (VitsModelManager.isReady(getApplication(), descriptor)) {
