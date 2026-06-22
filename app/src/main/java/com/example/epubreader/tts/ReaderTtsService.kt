@@ -473,13 +473,8 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                 var sentenceIdx = sentenceIndex
                 while (pipeline.isCurrentSerial(serial) && playing) {
                     val current = chapterSentences.getOrNull(sentenceIdx) ?: break
-                    val chunks = SynthesisChunker.split(current.key(), current.text, pauseConfig)
-                    if (chunks.isEmpty()) {
-                        sentenceIdx++
-                        continue
-                    }
-                    for ((chunkIndex, chunk) in chunks.withIndex()) {
-                        if (!pipeline.isCurrentSerial(serial)) return@launch
+                    if (activePack.engineKind == TtsEngineKind.BERT_VITS2_MNN) {
+                        val chunk = SynthesisChunk(current.key(), 0, current.text, pauseMs = 30)
                         val audio = synthesizeChunk(chunk, serial) ?: return@launch
                         if (!pipeline.isCurrentSerial(serial) || audio.samples.isEmpty()) return@launch
                         pipeline.enqueueAudio(
@@ -487,8 +482,26 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                             sampleRate = audio.sampleRate,
                             s = serial,
                             sentenceKey = current.key(),
-                            isSentenceEnd = chunkIndex == chunks.lastIndex,
+                            isSentenceEnd = true,
                         )
+                    } else {
+                        val chunks = SynthesisChunker.split(current.key(), current.text, pauseConfig)
+                        if (chunks.isEmpty()) {
+                            sentenceIdx++
+                            continue
+                        }
+                        for ((chunkIndex, chunk) in chunks.withIndex()) {
+                            if (!pipeline.isCurrentSerial(serial)) return@launch
+                            val audio = synthesizeChunk(chunk, serial) ?: return@launch
+                            if (!pipeline.isCurrentSerial(serial) || audio.samples.isEmpty()) return@launch
+                            pipeline.enqueueAudio(
+                                samples = audio.samples,
+                                sampleRate = audio.sampleRate,
+                                s = serial,
+                                sentenceKey = current.key(),
+                                isSentenceEnd = chunkIndex == chunks.lastIndex,
+                            )
+                        }
                     }
                     sentenceIdx++
                 }
