@@ -180,7 +180,7 @@ fun ReaderScreen(
             val visibleSentence = visible.sentence
             if (position.isSpeaking || visibleSentence == null) return@collect
             val currentChapterPath = state.parsed?.chapters?.getOrNull(position.chapterIndex)?.path
-            if (visibleSentence.sentence.chapterPath != currentChapterPath) {
+            if (!visible.isScrollInProgress && visibleSentence.sentence.chapterPath != currentChapterPath) {
                 vm.visibleSentence(visibleSentence.sentence)
             } else if (!visible.isScrollInProgress) {
                 if (visibleSentence.chapterIndex == position.chapterIndex) {
