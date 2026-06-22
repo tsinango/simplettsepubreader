@@ -27,6 +27,23 @@ interface IBertVITS2JNI {
     ): FloatArray?
 
     fun setAudioLengthScale(length_scale: Float)
+
+    // ---- Phase 2: backend selection --------------------------------------------
+    // Backend ids MUST stay in sync with the C++ enum `MNN_BERT_VITS2::Backend`
+    // (bertvits2-jni/src/main/cpp/bert_vits2_v23_loader.hpp).
+    // CPU=0, OPENCL_ALL=1, OPENCL_DECODER=2, NNAPI=3, AUTO=4
+    //
+    // Call setBackend BEFORE initBertVITS2Loader() so the executor that
+    // gets constructed matches the requested backend.
+    fun setBackend(backend: Int)
+
+    fun getActiveBackend(): Int
+
+    fun getRequestedBackend(): Int
+
+    fun openclAvailable(): Boolean
+
+    fun setCpuThreads(threads: Int)
 }
 
 // Concrete implementation that keeps the native bindings.
@@ -59,10 +76,32 @@ class BertVITS2JNI : IBertVITS2JNI {
 
     external override fun setAudioLengthScale(length_scale: Float)
 
+    // ---- Phase 2: backend selection --------------------------------------------
+    external override fun setBackend(backend: Int)
+
+    external override fun getActiveBackend(): Int
+
+    external override fun getRequestedBackend(): Int
+
+    external override fun openclAvailable(): Boolean
+
+    external override fun setCpuThreads(threads: Int)
+
     companion object {
         // Used to load the 'bertvits2' library on application startup.
+        //
+        // Phase 2 (OpenCL): with MNN_SEP_BUILD=OFF the Express symbols are
+        // baked into libMNN.so and there is no separate libMNN_Express.so on
+        // disk -- the optional load below is tolerated via try/catch.
+        // The Phase 1 (CPU) build still ships libMNN_Express.so, in which case
+        // the load succeeds and no symbols are duplicated (Express symbols are
+        // weak in libMNN.so and resolved to libMNN_Express.so first).
         init {
-            System.loadLibrary("MNN_Express")
+            try {
+                System.loadLibrary("MNN_Express")
+            } catch (_: UnsatisfiedLinkError) {
+                // Phase 2 combined build: Express is in libMNN.so
+            }
             System.loadLibrary("MNN")
             System.loadLibrary("bertvits2")
         }

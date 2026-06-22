@@ -5,6 +5,18 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Phase 2: OpenCL availability is declared as optional so devices without
+         a vendor OpenCL driver can still install and run with CPU fallback.
+         required="false" is REQUIRED: a true value would block installation on
+         every device without OpenCL, which is exactly the crash root cause
+         encountered when 10f88ee shipped an OpenCL-flavoured libMNN.so
+         without this declaration.  The BV2 C++ loader (see `probe_opencl_support`
+         in bert_vits2_v23_loader.cpp) dynamically opens libOpenCL.so via MNN's
+         dlopen path at runtime and auto-falls-back to CPU on any failure. -->
+    <uses-feature android:name="android.hardware.opengles.aep" android:required="false" />
+    <uses-feature android:glEsVersion="0x00030000" android:required="false" />
+
     <queries>
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />
