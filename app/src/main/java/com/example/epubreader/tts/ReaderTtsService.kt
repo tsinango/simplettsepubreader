@@ -88,6 +88,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private var recoveryJob: Job? = null
     private var engineRecreateJob: Job? = null
     private var speechRate = 1f
+    private var pauseConfig = PauseConfig()
     private var lastSavedKey: String? = null
     private var lastBroadcastState: String? = null
     private var hasAudioFocus = false
@@ -360,6 +361,13 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         val modelId = VitsModelId.fromStableValue(settings?.vitsModelId) ?: VitsModelId.FANCHEN_WNJ
         activePack = EmbeddedModelRegistry.byId(modelId)
         speechRate = TtsRatePolicy.userRate(settings?.speechRate ?: 1f)
+        pauseConfig = PauseConfig(
+            strongMs = settings?.strongPauseMs ?: 350,
+            semicolonMs = settings?.semicolonPauseMs ?: 220,
+            commaMs = settings?.commaPauseMs ?: 130,
+            ideographicCommaMs = settings?.ideographicCommaPauseMs ?: 80,
+            defaultMs = settings?.defaultPauseMs ?: 40,
+        )
         when (activePack.engineKind) {
             TtsEngineKind.SHERPA_KOKORO -> {
                 currentEmbeddedSid = embeddedSelection.speakerId(
@@ -465,7 +473,7 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                 var sentenceIdx = sentenceIndex
                 while (pipeline.isCurrentSerial(serial) && playing) {
                     val current = chapterSentences.getOrNull(sentenceIdx) ?: break
-                    val chunks = SynthesisChunker.split(current.key(), current.text)
+                    val chunks = SynthesisChunker.split(current.key(), current.text, pauseConfig)
                     if (chunks.isEmpty()) {
                         sentenceIdx++
                         continue

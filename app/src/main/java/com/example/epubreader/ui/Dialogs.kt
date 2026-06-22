@@ -77,6 +77,16 @@ fun SettingsDialog(
                 Slider(value.lineHeight, { value = value.copy(lineHeight = it) }, valueRange = 1.2f..2.2f)
                 Text(context.getString(R.string.speech_rate, "%.1f".format(value.speechRate)))
                 Slider(value.speechRate, { value = value.copy(speechRate = it) }, valueRange = .5f..2f)
+                Text("句号停顿：${value.strongPauseMs}ms")
+                Slider(value.strongPauseMs.toFloat(), { value = value.copy(strongPauseMs = it.toInt()) }, valueRange = 10f..1000f, steps = 98)
+                Text("分号停顿：${value.semicolonPauseMs}ms")
+                Slider(value.semicolonPauseMs.toFloat(), { value = value.copy(semicolonPauseMs = it.toInt()) }, valueRange = 10f..1000f, steps = 98)
+                Text("逗号停顿：${value.commaPauseMs}ms")
+                Slider(value.commaPauseMs.toFloat(), { value = value.copy(commaPauseMs = it.toInt()) }, valueRange = 10f..1000f, steps = 98)
+                Text("顿号停顿：${value.ideographicCommaPauseMs}ms")
+                Slider(value.ideographicCommaPauseMs.toFloat(), { value = value.copy(ideographicCommaPauseMs = it.toInt()) }, valueRange = 10f..1000f, steps = 98)
+                Text("默认停顿：${value.defaultPauseMs}ms")
+                Slider(value.defaultPauseMs.toFloat(), { value = value.copy(defaultPauseMs = it.toInt()) }, valueRange = 10f..1000f, steps = 98)
                 Text(context.getString(R.string.tts_engine_label))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     TextButton(onClick = {

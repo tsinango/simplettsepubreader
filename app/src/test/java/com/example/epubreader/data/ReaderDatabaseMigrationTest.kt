@@ -89,7 +89,7 @@ class ReaderDatabaseMigrationTest {
 
         // Open with Room; the 2->3 and 3->4 migrations must run and pass schema validation.
         val migrated = Room.databaseBuilder(context, ReaderDatabase::class.java, dbName)
-            .addMigrations(ReaderDatabase.MIGRATION_2_3, ReaderDatabase.MIGRATION_3_4)
+            .addMigrations(ReaderDatabase.MIGRATION_2_3, ReaderDatabase.MIGRATION_3_4, ReaderDatabase.MIGRATION_4_5)
             .build()
         val locators = migrated.dao().locators().first()
         assertEquals(1, locators.size)

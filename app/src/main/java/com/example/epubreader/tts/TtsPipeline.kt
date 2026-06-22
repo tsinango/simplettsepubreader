@@ -9,6 +9,14 @@ data class SynthesisChunk(
     val key: String = "$logicalSentenceKey:$index"
 }
 
+data class PauseConfig(
+    val strongMs: Int = 350,
+    val semicolonMs: Int = 220,
+    val commaMs: Int = 130,
+    val ideographicCommaMs: Int = 80,
+    val defaultMs: Int = 40,
+)
+
 object SynthesisChunker {
     const val MAX_CHARS = 80
     private const val MIN_BREAK_CHARS = 15
@@ -17,15 +25,15 @@ object SynthesisChunker {
     private val weakPunctuation = setOf('；', ';', '：', ':', '，', ',', '、')
     private val closingChars = setOf('"', '\'', '\u201C', '\u201D', '\u2018', '\u2019', '」', '』', '）', '】', '》', '〉', '〕')
 
-    fun pauseMsFor(ch: Char): Int = when (ch) {
-        '。', '！', '？', '!', '?' -> 350
-        '；', ';', '：', ':' -> 220
-        '，', ',' -> 130
-        '、' -> 80
-        else -> 40
+    fun pauseMsFor(ch: Char, config: PauseConfig = PauseConfig()): Int = when (ch) {
+        '。', '！', '？', '!', '?' -> config.strongMs
+        '；', ';', '：', ':' -> config.semicolonMs
+        '，', ',' -> config.commaMs
+        '、' -> config.ideographicCommaMs
+        else -> config.defaultMs
     }
 
-    fun split(logicalSentenceKey: String, text: String): List<SynthesisChunk> {
+    fun split(logicalSentenceKey: String, text: String, config: PauseConfig = PauseConfig()): List<SynthesisChunk> {
         val normalized = text.trim()
         if (normalized.isEmpty()) return emptyList()
 
@@ -41,12 +49,12 @@ object SynthesisChunker {
             when {
                 ch in strongPunctuation -> {
                     val end = if (i + 1 < len && normalized[i + 1] in closingChars) i + 2 else i + 1
-                    result.add(SynthesisChunk(logicalSentenceKey, result.size, normalized.substring(start, end), pauseMsFor(ch)))
+                    result.add(SynthesisChunk(logicalSentenceKey, result.size, normalized.substring(start, end), pauseMsFor(ch, config)))
                     start = end
                     i = end
                 }
                 ch in weakPunctuation && charsSinceBreak >= MIN_BREAK_CHARS -> {
-                    result.add(SynthesisChunk(logicalSentenceKey, result.size, normalized.substring(start, i + 1), pauseMsFor(ch)))
+                    result.add(SynthesisChunk(logicalSentenceKey, result.size, normalized.substring(start, i + 1), pauseMsFor(ch, config)))
                     start = i + 1
                     i = start
                 }
@@ -54,10 +62,10 @@ object SynthesisChunker {
                     val searchStart = start + MIN_BREAK_CHARS
                     val breakPos = if (searchStart < i) findLastPunct(normalized, searchStart, i) else -1
                     if (breakPos >= searchStart) {
-                        result.add(SynthesisChunk(logicalSentenceKey, result.size, normalized.substring(start, breakPos + 1), pauseMsFor(normalized[breakPos])))
+                        result.add(SynthesisChunk(logicalSentenceKey, result.size, normalized.substring(start, breakPos + 1), pauseMsFor(normalized[breakPos], config)))
                         start = breakPos + 1
                     } else {
-                        result.add(SynthesisChunk(logicalSentenceKey, result.size, normalized.substring(start, i), 40))
+                        result.add(SynthesisChunk(logicalSentenceKey, result.size, normalized.substring(start, i), config.defaultMs))
                         start = i
                     }
                     i = start
@@ -70,7 +78,7 @@ object SynthesisChunker {
 
         if (start < len) {
             val trailing = normalized.substring(start)
-            result.add(SynthesisChunk(logicalSentenceKey, result.size, trailing, pauseMsFor(trailing.last())))
+            result.add(SynthesisChunk(logicalSentenceKey, result.size, trailing, pauseMsFor(trailing.last(), config)))
         }
 
         return result

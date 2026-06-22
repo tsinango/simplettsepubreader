@@ -54,7 +54,7 @@ interface ReaderDao {
 
 @Database(
     entities = [BookEntity::class, ReadingLocatorEntity::class, ReaderSettingsEntity::class],
-    version = 4,
+    version = 5,
     exportSchema = false,
 )
 abstract class ReaderDatabase : RoomDatabase() {
@@ -65,7 +65,7 @@ abstract class ReaderDatabase : RoomDatabase() {
             context,
             ReaderDatabase::class.java,
             "reader.db",
-        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build()
+        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build()
 
         internal val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -99,6 +99,16 @@ abstract class ReaderDatabase : RoomDatabase() {
                 db.execSQL(
                     "ALTER TABLE settings ADD COLUMN vitsModelId TEXT NOT NULL DEFAULT 'FANCHEN_WNJ'",
                 )
+            }
+        }
+
+        internal val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE settings ADD COLUMN strongPauseMs INTEGER NOT NULL DEFAULT 350")
+                db.execSQL("ALTER TABLE settings ADD COLUMN semicolonPauseMs INTEGER NOT NULL DEFAULT 220")
+                db.execSQL("ALTER TABLE settings ADD COLUMN commaPauseMs INTEGER NOT NULL DEFAULT 130")
+                db.execSQL("ALTER TABLE settings ADD COLUMN ideographicCommaPauseMs INTEGER NOT NULL DEFAULT 80")
+                db.execSQL("ALTER TABLE settings ADD COLUMN defaultPauseMs INTEGER NOT NULL DEFAULT 40")
             }
         }
     }

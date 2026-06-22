@@ -51,6 +51,11 @@ data class ReaderSettingsEntity(
     val voiceName: String? = null,
     val ttsEngine: String = "SYSTEM",
     val vitsModelId: String = "FANCHEN_WNJ",
+    val strongPauseMs: Int = 350,
+    val semicolonPauseMs: Int = 220,
+    val commaPauseMs: Int = 130,
+    val ideographicCommaPauseMs: Int = 80,
+    val defaultPauseMs: Int = 40,
 )
 
 data class Chapter(
