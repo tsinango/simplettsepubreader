@@ -28,15 +28,15 @@ data class BertVits2MnnPackDescriptor(
 object BertVits2MnnModelRegistry {
     private const val REVISION = "v1"
     private const val ZIP_NAME = "bertvits2-zh-22k-v1.zip"
-    private const val ZIP_SIZE = 146703918L
-    private const val ZIP_SHA256 = "b9228036b2ac8a93a92d8eec8688b2b6c7def08638bdd0aa81f9cabd26627c85"
+    private const val ZIP_SIZE = 126959959L
+    private const val ZIP_SHA256 = "648997532dee10a09576cb7ffad443528a14f71ea0d241168e705c086ac270ae"
     private const val DOWNLOAD_URL = "https://github.com/tsinango/simplettsepubreader/releases/download/v1.3/bertvits2-zh-22k-v1.zip"
 
     val bertVits2Mnn22k = BertVits2MnnPackDescriptor(
         id = VitsModelId.BERT_VITS2_MNN_22K,
         engineKind = TtsEngineKind.BERT_VITS2_MNN,
         displayName = VitsModelId.BERT_VITS2_MNN_22K.displayName,
-        sizeLabel = "约 140 MB",
+        sizeLabel = "约 127 MB",
         totalSizeBytes = ZIP_SIZE,
         dirName = "models/bertvits2-mnn-22k-zh",
         revision = REVISION,
