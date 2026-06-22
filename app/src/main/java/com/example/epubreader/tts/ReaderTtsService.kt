@@ -471,35 +471,27 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
             try {
                 var sentenceIdx = sentenceIndex
                 if (activePack.engineKind == TtsEngineKind.BERT_VITS2_MNN) {
-                    // Pre-generate 2 sentences before starting playback
-                    val pregen = mutableListOf<Pair<FloatArray, Int>>()
-                    val pregenKeys = mutableListOf<String>()
+                    // Pre-generate 2 batches before starting playback
+                    data class Batch(val samples: FloatArray, val sampleRate: Int, val key: String)
+                    val pregen = mutableListOf<Batch>()
                     repeat(2) {
-                        val current = chapterSentences.getOrNull(sentenceIdx) ?: return@launch
-                        val chunk = SynthesisChunk(current.key(), 0, current.text, pauseMs = 30)
-                        val audio = synthesizeChunk(chunk, serial) ?: return@launch
+                        val batch = buildBatch(chapterSentences, sentenceIdx)
+                        if (batch == null) return@launch
+                        val audio = synthesizeChunk(SynthesisChunk(batch.key, 0, batch.text, pauseMs = 30), serial)
+                            ?: return@launch
                         if (!pipeline.isCurrentSerial(serial) || audio.samples.isEmpty()) return@launch
-                        pregen.add(audio.samples to audio.sampleRate)
-                        pregenKeys.add(current.key())
-                        sentenceIdx++
+                        pregen.add(Batch(audio.samples, audio.sampleRate, batch.key))
+                        sentenceIdx += batch.size
                     }
                     pipeline.startPlayback(serial)
-                    pregen.forEachIndexed { i, (samples, rate) ->
-                        pipeline.enqueueAudio(samples, rate, serial, pregenKeys[i], true)
-                    }
+                    pregen.forEach { pipeline.enqueueAudio(it.samples, it.sampleRate, serial, it.key, true) }
                     while (pipeline.isCurrentSerial(serial) && playing) {
-                        val current = chapterSentences.getOrNull(sentenceIdx) ?: break
-                        val chunk = SynthesisChunk(current.key(), 0, current.text, pauseMs = 30)
-                        val audio = synthesizeChunk(chunk, serial) ?: return@launch
+                        val batch = buildBatch(chapterSentences, sentenceIdx) ?: break
+                        val audio = synthesizeChunk(SynthesisChunk(batch.key, 0, batch.text, pauseMs = 30), serial)
+                            ?: return@launch
                         if (!pipeline.isCurrentSerial(serial) || audio.samples.isEmpty()) return@launch
-                        pipeline.enqueueAudio(
-                            samples = audio.samples,
-                            sampleRate = audio.sampleRate,
-                            s = serial,
-                            sentenceKey = current.key(),
-                            isSentenceEnd = true,
-                        )
-                        sentenceIdx++
+                        pipeline.enqueueAudio(audio.samples, audio.sampleRate, serial, batch.key, true)
+                        sentenceIdx += batch.size
                     }
                 } else {
                     pipeline.startPlayback(serial)
@@ -585,6 +577,23 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         TtsEngineKind.SHERPA_VITS -> 0 to vitsEngineSpeed(speechRate)
         TtsEngineKind.SHERPA_KOKORO -> currentEmbeddedSid to currentEmbeddedUserRate
         TtsEngineKind.BERT_VITS2_MNN -> currentEmbeddedSid to currentEmbeddedUserRate
+    }
+
+    private data class SentenceBatch(val text: String, val key: String, val size: Int)
+
+    private fun buildBatch(sentences: List<SentenceRef>, startIdx: Int): SentenceBatch? {
+        if (startIdx !in sentences.indices) return null
+        val batch = mutableListOf<SentenceRef>()
+        var totalChars = 0
+        var idx = startIdx
+        while (idx < sentences.size && batch.size < 3) {
+            val s = sentences[idx]
+            if (totalChars + s.text.length > 150 && batch.isNotEmpty()) break
+            batch.add(s)
+            totalChars += s.text.length
+            idx++
+        }
+        return SentenceBatch(batch.joinToString("") { it.text }, batch.first().key(), batch.size)
     }
 
     private fun isGenerationCurrent(serial: Int): Boolean =
