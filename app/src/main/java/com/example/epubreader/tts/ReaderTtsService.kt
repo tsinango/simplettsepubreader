@@ -466,14 +466,29 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
         }
         val serial = embeddedGenerationSerial
         pipeline.setFloatSupported(floatPcmSupported)
-        pipeline.startPlayback(serial)
         generationJob?.cancel()
         generationJob = scope.launch(Dispatchers.Default) {
             try {
                 var sentenceIdx = sentenceIndex
-                while (pipeline.isCurrentSerial(serial) && playing) {
-                    val current = chapterSentences.getOrNull(sentenceIdx) ?: break
-                    if (activePack.engineKind == TtsEngineKind.BERT_VITS2_MNN) {
+                if (activePack.engineKind == TtsEngineKind.BERT_VITS2_MNN) {
+                    // Pre-generate 2 sentences before starting playback
+                    val pregen = mutableListOf<Pair<FloatArray, Int>>()
+                    val pregenKeys = mutableListOf<String>()
+                    repeat(2) {
+                        val current = chapterSentences.getOrNull(sentenceIdx) ?: return@launch
+                        val chunk = SynthesisChunk(current.key(), 0, current.text, pauseMs = 30)
+                        val audio = synthesizeChunk(chunk, serial) ?: return@launch
+                        if (!pipeline.isCurrentSerial(serial) || audio.samples.isEmpty()) return@launch
+                        pregen.add(audio.samples to audio.sampleRate)
+                        pregenKeys.add(current.key())
+                        sentenceIdx++
+                    }
+                    pipeline.startPlayback(serial)
+                    pregen.forEachIndexed { i, (samples, rate) ->
+                        pipeline.enqueueAudio(samples, rate, serial, pregenKeys[i], true)
+                    }
+                    while (pipeline.isCurrentSerial(serial) && playing) {
+                        val current = chapterSentences.getOrNull(sentenceIdx) ?: break
                         val chunk = SynthesisChunk(current.key(), 0, current.text, pauseMs = 30)
                         val audio = synthesizeChunk(chunk, serial) ?: return@launch
                         if (!pipeline.isCurrentSerial(serial) || audio.samples.isEmpty()) return@launch
@@ -484,7 +499,12 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                             sentenceKey = current.key(),
                             isSentenceEnd = true,
                         )
-                    } else {
+                        sentenceIdx++
+                    }
+                } else {
+                    pipeline.startPlayback(serial)
+                    while (pipeline.isCurrentSerial(serial) && playing) {
+                        val current = chapterSentences.getOrNull(sentenceIdx) ?: break
                         val chunks = SynthesisChunker.split(current.key(), current.text, pauseConfig)
                         if (chunks.isEmpty()) {
                             sentenceIdx++
@@ -502,8 +522,8 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
                                 isSentenceEnd = chunkIndex == chunks.lastIndex,
                             )
                         }
+                        sentenceIdx++
                     }
-                    sentenceIdx++
                 }
                 pipeline.closeChannel()
             } catch (e: CancellationException) {
