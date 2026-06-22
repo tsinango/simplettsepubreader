@@ -19,30 +19,13 @@ import java.io.File
  * Description:
  */
 class BertVITS2FullInferImpl(val context: Context, val modelRootPath: String = context.filesDir.absolutePath): IBertVITS2FullInfer,
-    IBertVITS2Preprocess by BertVITS2PreprocessFactoryImpl(context),
+    IBertVITS2Preprocess by BertVITS2PreprocessFactoryImpl(context, modelRootPath),
     IBertVITS2JNI by BertVITS2JNI() {
 
     override suspend fun initPreprocessor(): Boolean {
         val srcDir = File(modelRootPath, "preprocess")
-        val desDir = File(context.filesDir, "preprocess")
-        if (srcDir.exists()) {
-            if (desDir.exists()) desDir.deleteRecursively()
-            srcDir.copyRecursively(desDir)
-            return true
-        }
-        // fallback: copy from APK assets
-        val preprocessResult = suspendCancellableCoroutine {
-            context.copyAssets2Local(
-                true,
-                "preprocess",
-                context.filesDir.absolutePath
-            ) { isSuccess: Boolean, absPath: String ->
-                Log.i("copyAssets2Local", "isSuccess: $isSuccess, absPath: $absPath")
-                it.safeResume(absPath)
-            }
-        }
-        if (preprocessResult.isEmpty()) {
-            Log.e("BertVITS2FullInferImpl", "Failed to copy preprocess assets")
+        if (!srcDir.exists()) {
+            Log.e("BertVITS2FullInferImpl", "preprocess directory not found at $modelRootPath/preprocess")
             return false
         }
         return true

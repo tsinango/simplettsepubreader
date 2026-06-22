@@ -27,23 +27,9 @@ class BertVITS2SimpleInferImpl(
     private val speakerSampleRateCache: MutableMap<String, Int> = TreeMap()
 
     override suspend fun init(): Boolean {
-        val filesDir = context.filesDir.absolutePath
-        val srcBert = File(modelRootPath, "bert")
-        val srcBv2 = File(modelRootPath, "bv2_model")
-        if (srcBert.exists()) {
-            val dstBert = File(filesDir, "bert")
-            if (dstBert.exists()) dstBert.deleteRecursively()
-            srcBert.copyRecursively(dstBert)
-        }
-        if (srcBv2.exists()) {
-            val dstBv2 = File(filesDir, "bv2_model")
-            if (dstBv2.exists()) dstBv2.deleteRecursively()
-            srcBv2.copyRecursively(dstBv2)
-        }
-
-        val bv2Dir = File(filesDir, "bv2_model")
+        val bv2Dir = File(modelRootPath, "bv2_model")
         if (!bv2Dir.exists()) {
-            Log.e("BertVITS2SimpleInferImpl", "Failed to locate bv2_model at $filesDir/bv2_model")
+            Log.e("BertVITS2SimpleInferImpl", "Failed to locate bv2_model at $modelRootPath/bv2_model")
             return false
         }
         bv2Dir.walkTopDown().forEach {
@@ -107,7 +93,7 @@ class BertVITS2SimpleInferImpl(
 
     private fun setInternalModelPath(spkName: String, actualLanguage: Int = getLanguageTypeFromSpkName(spkName)) {
         val modelDir = nameListCache[spkName]!!.split("-")[1]
-        val basePath = "${context.filesDir.absolutePath}/bv2_model/$modelDir"
+        val basePath = "$modelRootPath/bv2_model/$modelDir"
         val files = mutableMapOf<String, String>()
         File(basePath).walkTopDown().forEach {
             if (it.isFile) {
@@ -122,9 +108,9 @@ class BertVITS2SimpleInferImpl(
             }
         }
         val bertModelPath = when (actualLanguage) {
-            LANGUAGE_ZH -> "${context.filesDir.absolutePath}/bert/zh/chinese-roberta-wwm-ext-large-distilled-fp16.mnn"
-            LANGUAGE_EN -> "${context.filesDir.absolutePath}/bert/en/deberta-v3-large-distilled.mnn"
-            LANGUAGE_JP -> "${context.filesDir.absolutePath}/bert/jp/deberta-v2-large-japanese-char-wwm-distilled.mnn"
+            LANGUAGE_ZH -> "$modelRootPath/bert/zh/chinese-roberta-wwm-ext-large-distilled-fp16.mnn"
+            LANGUAGE_EN -> "$modelRootPath/bert/en/deberta-v3-large-distilled.mnn"
+            LANGUAGE_JP -> "$modelRootPath/bert/jp/deberta-v2-large-japanese-char-wwm-distilled.mnn"
             LANGUAGE_MIX_ZH_EN -> ""
             else -> throw IllegalArgumentException("Unsupported language type")
         }
