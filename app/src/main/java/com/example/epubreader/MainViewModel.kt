@@ -466,42 +466,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_readerPosition.value.isSpeaking) sendAction(ReaderTtsService.ACTION_SETTINGS_CHANGED)
     }
 
-    /**
-     * Imports a Bert-VITS2-MNN pack ZIP selected via SAF. BV2 has no stable
-     * redistributable HTTP URL (upstream ships bytes via Git LFS), so this is
-     * the only install path for the BV2 pack — see
-     * [com.example.epubreader.tts.BertVits2MnnModelRegistry].
-     */
-    fun importBertVits2MnnPack(modelId: VitsModelId, uri: android.net.Uri) {
-        if (modelId != VitsModelId.BERT_VITS2_MNN_22K) return
-        try {
-            val flag = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
-            getApplication<Application>().contentResolver.takePersistableUriPermission(uri, flag)
-        } catch (_: SecurityException) {
-            // best-effort; the immediate call below still has the read grant.
-        }
-        viewModelScope.launch {
-            val error = try {
-                withContext(Dispatchers.IO) {
-                    val descriptor = EmbeddedModelRegistry.byId(modelId)
-                        as com.example.epubreader.tts.BertVits2MnnPackDescriptor
-                    val resolver = getApplication<Application>().contentResolver
-                    resolver.openInputStream(uri)?.use { input ->
-                        com.example.epubreader.tts.bertvits2.BertVits2MnnPackImporter(
-                            getApplication(), descriptor,
-                        ).install(input)
-                    } ?: throw java.io.IOException("无法读取选中的 ZIP")
-                }
-                applyImportedSettings(modelId)
-                null
-            } catch (e: Throwable) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                e.message ?: e::class.java.simpleName
-            }
-            _reader.value = _reader.value.copy(error = error)
-        }
-    }
-
     private fun applyImportedSettings(modelId: VitsModelId) {
         val descriptor = EmbeddedModelRegistry.byId(modelId)
         if (VitsModelManager.isReady(getApplication(), descriptor)) {

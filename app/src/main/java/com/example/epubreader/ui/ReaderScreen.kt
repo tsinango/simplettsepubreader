@@ -124,10 +124,6 @@ fun ReaderScreen(
             }
         }
     }
-    val bv2PackImporter = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument(),
-    ) { uri -> if (uri != null) vm.importBertVits2MnnPack(VitsModelId.BERT_VITS2_MNN_22K, uri) }
-
     fun onClearDiagnostics() {
         uiScope.launch {
             diagnosticClearMessage = null
@@ -284,11 +280,6 @@ fun ReaderScreen(
             },
             onSetEmbeddedSpeakerId = vm::setEmbeddedSpeakerId,
             onSetEmbeddedRate = vm::setEmbeddedRate,
-            onImportPack = { id ->
-                if (id == VitsModelId.BERT_VITS2_MNN_22K) {
-                    bv2PackImporter.launch(arrayOf("application/zip", "*/*"))
-                }
-            },
             onExportDiagnostics = {
                 diagnosticExportMessage = null
                 diagnosticExporter.launch(DiagnosticLogger.defaultExportFileName())

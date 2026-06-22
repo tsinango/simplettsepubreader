@@ -4,3 +4,8 @@
 # native method lookup in release builds.
 -keep class com.k2fsa.sherpa.onnx.** { *; }
 
+# Bert-VITS2-MNN JNI classes
+-keep class com.example.bertvits2.** { *; }
+-keep class com.example.cppjieba.** { *; }
+-keep class com.example.cpptokenizer.** { *; }
+

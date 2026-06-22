@@ -51,7 +51,6 @@ fun SettingsDialog(
     getEmbeddedRate: (VitsModelId) -> Float,
     onSetEmbeddedSpeakerId: (VitsModelId, Int) -> Unit,
     onSetEmbeddedRate: (VitsModelId, Float) -> Unit,
-    onImportPack: (VitsModelId) -> Unit,
     onExportDiagnostics: () -> Unit,
     diagnosticExportMessage: String?,
     onClearDiagnostics: () -> Unit,
@@ -114,9 +113,7 @@ fun SettingsDialog(
                                     vitsModelId = descriptor.id.stableValue,
                                 )
                                 onUseVitsModel(descriptor.id)
-                            } else if (descriptor.engineKind == TtsEngineKind.BERT_VITS2_MNN) {
-                                onImportPack(descriptor.id)
-                            } else {
+                                } else {
                                 confirmDownloadModel = descriptor.id
                             }
                         },
@@ -126,7 +123,6 @@ fun SettingsDialog(
                         onSetSpeakerId = { sid -> onSetEmbeddedSpeakerId(descriptor.id, sid) },
                         setRate = { rate -> onSetEmbeddedRate(descriptor.id, rate) },
                         onPickSpeaker = { kokoroSpeakerPickerForId = descriptor.id },
-                        onImportPack = { onImportPack(descriptor.id) },
                     )
                 }
                 Text(context.getString(R.string.theme_label))
@@ -243,7 +239,6 @@ private fun EmbeddedModelSection(
     onSetSpeakerId: (Int) -> Unit,
     setRate: (Float) -> Unit,
     onPickSpeaker: () -> Unit,
-    onImportPack: () -> Unit,
 ) {
     val context = LocalContext.current
     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -289,20 +284,11 @@ private fun EmbeddedModelSection(
                 state.error ?: context.getString(R.string.model_not_downloaded),
                 color = MaterialTheme.colorScheme.error,
             )
-            if (descriptor.engineKind == TtsEngineKind.BERT_VITS2_MNN) {
-                TextButton(onClick = onImportPack) { Text("重新导入 BV2 ZIP…") }
-            } else {
-                TextButton(onClick = onDownload) { Text(context.getString(R.string.retry_download)) }
-            }
+            TextButton(onClick = onDownload) { Text(context.getString(R.string.retry_download)) }
         }
         VitsModelStatus.NOT_DOWNLOADED -> {
-            if (descriptor.engineKind == TtsEngineKind.BERT_VITS2_MNN) {
-                Text("Bert-VITS2-MNN 仅供学习交流，禁商业用途；需 AAR 与示例模型。")
-                TextButton(onClick = onImportPack) { Text("本地导入 BV2 ZIP…") }
-            } else {
-                Text(context.getString(R.string.model_not_downloaded))
-                TextButton(onClick = onDownload) { Text(context.getString(R.string.download)) }
-            }
+            Text(context.getString(R.string.model_not_downloaded))
+            TextButton(onClick = onDownload) { Text(context.getString(R.string.download)) }
         }
     }
 }
