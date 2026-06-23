@@ -101,6 +101,11 @@ class BertVits2MnnEngine(
         jni.setCpuThreads(cpuThreads)
         jni.setBackend(requestedBackend.nativeId)
         val openclAvail = jni.openclAvailable()
+        if (openclAvail && requestedBackend.nativeId >= 1) {
+            val cacheFile = File(modelDir.parentFile ?: modelDir, "opencl_cache.bin")
+            jni.setOpenclCachePath(cacheFile.absolutePath)
+            DiagnosticLogger.event("VITS_ENGINE", "opencl_cache_path=${cacheFile.absolutePath}")
+        }
 
         val impl = BertVITS2SimpleInferImpl(context, modelDir.absolutePath)
         runBlocking {
