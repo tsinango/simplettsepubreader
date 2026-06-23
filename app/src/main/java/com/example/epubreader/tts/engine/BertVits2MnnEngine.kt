@@ -46,25 +46,14 @@ class BertVits2MnnEngine(
         )
     }
 
-    /**
-     * Read the backend the C++ engine actually activated (after AUTO/fallback).
-     *
-     * On Phase 1 (CPU-only) builds that don't export `getActiveBackend` this
-     * returns the requested backend -- callers should treat it as "best
-     * available information" and not rely on it for correctness.
-     */
+    /** Read the backend the C++ engine actually activated after AUTO/fallback. */
     fun activeBackend(): BertVits2Backend {
         val native = inferImpl ?: return requestedBackend
         // BertVITS2JNI is a stateless JNI class; its external methods all
         // operate on global native state, so a fresh instance reads the same
         // backend config that BertVITS2FullInferImpl set via its by-delegation
         // holder.  This avoids reflectively poking private lazy fields.
-        val activeNativeId = try {
-            BertVITS2JNI().getActiveBackend()
-        } catch (e: UnsatisfiedLinkError) {
-            // Phase 1 CPU-only libbertvits2.so -- no getActiveBackend symbol
-            requestedBackend.nativeId
-        }
+        val activeNativeId = BertVITS2JNI().getActiveBackend()
         return runCatching { BertVits2Backend.fromNativeId(activeNativeId) }
             .getOrDefault(requestedBackend)
     }
@@ -106,26 +95,12 @@ class BertVits2MnnEngine(
             DiagnosticLogger.event("VITS_ENGINE", "extracted_bv2_zip size=${zipFile.length()}")
         }
 
-        // ---- Phase 2: push backend config into native BEFORE init() ------------
-        // init() in BertVITS2SimpleInferImpl calls initBertVITS2Loader() which
-        // constructs the BV2 Executor -- so setBackend/setCpuThreads must run
-        // first.  BertVITS2JNI is stateless: its external methods all touch
-        // the same global native state used by BertVITS2FullInferImpl, so a
-        // fresh instance is enough.  UnsatisfiedLinkError on a Phase 1 CPU
-        // build (no setBackend/setCpuThreads symbols) is caught and treated
-        // as "no backend control -- use original CPU behaviour".
-        var openclAvail = false
-        try {
-            val jni = BertVITS2JNI()
-            jni.setCpuThreads(cpuThreads)
-            jni.setBackend(requestedBackend.nativeId)
-            openclAvail = jni.openclAvailable()
-        } catch (e: UnsatisfiedLinkError) {
-            DiagnosticLogger.event(
-                "VITS_ENGINE",
-                "backend_select_skipped model=${descriptor.id.stableValue} reason='${e.javaClass.simpleName}: ${e.message}' using_cpu_default",
-            )
-        }
+        // Push backend config into native before init constructs the executor.
+        // Missing JNI symbols are a packaging error and must not be hidden as CPU fallback.
+        val jni = BertVITS2JNI()
+        jni.setCpuThreads(cpuThreads)
+        jni.setBackend(requestedBackend.nativeId)
+        val openclAvail = jni.openclAvailable()
 
         val impl = BertVITS2SimpleInferImpl(context, modelDir.absolutePath)
         runBlocking {

@@ -27,6 +27,7 @@ import com.example.epubreader.data.ReadingLocatorEntity
 import com.example.epubreader.data.SentenceRef
 import com.example.epubreader.MainViewModel
 import com.example.epubreader.tts.engine.BertVits2MnnEngine
+import com.example.epubreader.tts.engine.BertVits2Backend
 import com.example.epubreader.tts.engine.EmbeddedTtsEngine
 import com.example.epubreader.tts.engine.EngineSwitchGate
 import com.example.epubreader.tts.engine.KokoroSherpaEngine
@@ -621,7 +622,9 @@ class ReaderTtsService : Service(), TextToSpeech.OnInitListener {
     private fun createEmbeddedEngine(pack: TtsModelPackDescriptor): EmbeddedTtsEngine = when (pack) {
         is VitsModelDescriptor -> SherpaVitsEngine(pack)
         is KokoroModelDescriptor -> KokoroSherpaEngine(pack)
-        is BertVits2MnnPackDescriptor -> BertVits2MnnEngine(pack)
+        is BertVits2MnnPackDescriptor -> BertVits2MnnEngine(pack).apply {
+            configureBackend(BertVits2Backend.OPENCL_FLOW, engineThreads)
+        }
         else -> error("Unsupported pack kind for descriptor: ${pack::class}")
     }
 

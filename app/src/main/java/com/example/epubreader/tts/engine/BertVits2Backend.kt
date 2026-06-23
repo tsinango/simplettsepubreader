@@ -18,6 +18,7 @@ enum class BertVits2Backend(val nativeId: Int, val displayName: String) {
     CPU(0, "CPU (MNN_FORWARD_CPU, Precision_Low_BF16, Memory_Low)"),
     OPENCL_ALL(1, "OpenCL FP16 (full pipeline on GPU)"),
     OPENCL_DECODER(2, "OpenCL Decoder-only (BERT/Enc/DP/Flow on CPU)"),
+    OPENCL_FLOW(5, "OpenCL Flow-only (Decoder on CPU)"),
     NNAPI(3, "NNAPI (MNN_FORWARD_NN)"),
     AUTO(4, "Auto (OpenCL when supported, else best CPU)");
 

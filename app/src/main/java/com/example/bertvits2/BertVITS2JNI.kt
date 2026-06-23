@@ -44,6 +44,23 @@ interface IBertVITS2JNI {
     fun openclAvailable(): Boolean
 
     fun setCpuThreads(threads: Int)
+
+    // ---- Phase 3: benchmark harness (P0d) ------------------------------------
+    // Runs start_audio_infer in a warmup + bench C++ loop.
+    // Same input arrays as startAudioInfer; returns timing via logcat only.
+    fun bv2RunBenchmark(
+        backend: Int,
+        cpuThreads: Int,
+        warmupIters: Int,
+        benchIters: Int,
+        input_seq: IntArray,
+        input_t: IntArray,
+        input_language: IntArray,
+        input_ids: IntArray,
+        input_word2ph: IntArray,
+        attention_mask: IntArray,
+        spkid: Int,
+    )
 }
 
 // Concrete implementation that keeps the native bindings.
@@ -86,6 +103,20 @@ class BertVITS2JNI : IBertVITS2JNI {
     external override fun openclAvailable(): Boolean
 
     external override fun setCpuThreads(threads: Int)
+
+    external override fun bv2RunBenchmark(
+        backend: Int,
+        cpuThreads: Int,
+        warmupIters: Int,
+        benchIters: Int,
+        input_seq: IntArray,
+        input_t: IntArray,
+        input_language: IntArray,
+        input_ids: IntArray,
+        input_word2ph: IntArray,
+        attention_mask: IntArray,
+        spkid: Int,
+    )
 
     companion object {
         // Used to load the 'bertvits2' library on application startup.

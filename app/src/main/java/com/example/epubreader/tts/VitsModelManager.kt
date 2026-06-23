@@ -194,6 +194,15 @@ class VitsModelManager(
             if (!marker.isFile) return false
             val markerRevision = runCatching { marker.readText().trim() }.getOrNull()
             if (markerRevision != descriptor.revision) return false
+            if (descriptor is BertVits2MnnPackDescriptor) {
+                val extractedMarker = File(dir, descriptor.extractedMarkerName)
+                if (extractedMarker.isFile) {
+                    return descriptor.extractedRequiredPaths.isNotEmpty() &&
+                        descriptor.extractedRequiredPaths.all { relativePath ->
+                            File(dir, relativePath).let { it.isFile && it.length() > 0L }
+                        }
+                }
+            }
             if (descriptor.specs.isEmpty()) {
                 val fileCount = dir.walk().count {
                     it.isFile && it.name != descriptor.readyMarkerName

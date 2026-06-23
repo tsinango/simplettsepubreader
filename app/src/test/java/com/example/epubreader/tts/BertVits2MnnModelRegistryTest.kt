@@ -30,6 +30,7 @@ class BertVits2MnnModelRegistryTest {
         assertEquals(".ready-bv2-22k-v1", pack.readyMarkerName)
         assertEquals(22_050, pack.sampleRate)
         assertEquals(1, pack.minManifestEntryCount)
+        assertTrue(pack.extractedRequiredPaths.isNotEmpty())
         assertTrue(
             "license mentions Apache and non-commercial combination",
             pack.license.contains("Apache"),
@@ -51,5 +52,24 @@ class BertVits2MnnModelRegistryTest {
         val url = pack.assetUrl(pack.specs.first())
         assertTrue(url.startsWith("https://github.com/"))
         assertTrue(url.endsWith(".zip"))
+    }
+
+    @Test
+    fun extractedPackRemainsReadyAfterVerifiedZipIsDeleted() {
+        val pack = BertVits2MnnModelRegistry.bertVits2Mnn22k
+        val dir = java.io.File(context.filesDir, pack.dirName).apply { mkdirs() }
+        java.io.File(dir, pack.readyMarkerName).writeText(pack.revision)
+        java.io.File(dir, pack.extractedMarkerName).writeText("ok")
+        pack.extractedRequiredPaths.forEach { relativePath ->
+            java.io.File(dir, relativePath).apply {
+                parentFile?.mkdirs()
+                writeBytes(byteArrayOf(1))
+            }
+        }
+
+        assertTrue(VitsModelManager.isReady(context, pack))
+
+        java.io.File(dir, pack.extractedRequiredPaths.first()).delete()
+        assertFalse(VitsModelManager.isReady(context, pack))
     }
 }

@@ -8,3 +8,7 @@
 .cxx
 .kotlin/
 /signing/
+.analysis/
+bench_mnn_arm64/
+BuildMnnOpencl/
+BuildMnnOpencl35/

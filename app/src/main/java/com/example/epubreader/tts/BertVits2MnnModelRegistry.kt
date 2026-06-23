@@ -17,6 +17,8 @@ data class BertVits2MnnPackDescriptor(
     override val speakerMetadata: List<SpeakerEntry>?,
     override val specs: List<ModelFileSpec> = emptyList(),
     override val minManifestEntryCount: Int = 1,
+    val extractedMarkerName: String = ".extracted",
+    val extractedRequiredPaths: List<String> = emptyList(),
 ) : TtsModelPackDescriptor {
     override fun assetUrl(spec: ModelFileSpec): String = DOWNLOAD_URL
 
@@ -50,6 +52,20 @@ object BertVits2MnnModelRegistry {
         speakerMetadata = emptyList(),
         specs = listOf(
             ModelFileSpec(ZIP_NAME, ZIP_SIZE, ZIP_SHA256),
+        ),
+        extractedRequiredPaths = listOf(
+            "bv2-pack-manifest.json",
+            "bert/zh/chinese-roberta-wwm-ext-large-distilled-fp16.mnn",
+            "bert/zh/tokenizer.json",
+            "bv2_model/zh/bert_vits23_genshin_arknights_dec.mnn",
+            "bv2_model/zh/bert_vits23_genshin_arknights_dp.mnn",
+            "bv2_model/zh/bert_vits23_genshin_arknights_emb.mnn",
+            "bv2_model/zh/bert_vits23_genshin_arknights_enc.mnn",
+            "bv2_model/zh/bert_vits23_genshin_arknights_flow.mnn",
+            "bv2_model/zh/bert_vits23_genshin_arknights_sdp.mnn",
+            "bv2_model/zh/config.json",
+            "preprocess/zh/opencpop-strict.txt",
+            "preprocess/zh/dict/jieba.dict.utf8",
         ),
     )
 }
