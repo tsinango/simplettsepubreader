@@ -45,6 +45,10 @@ interface IBertVITS2JNI {
 
     fun setCpuThreads(threads: Int)
 
+    // ---- Phase 3: persistent OpenCL tuning cache -----------------------------
+    // Must be set BEFORE initBertVITS2Loader() to take effect.
+    fun setOpenclCachePath(cachePath: String)
+
     // ---- Phase 3: benchmark harness (P0d) ------------------------------------
     // Runs start_audio_infer in a warmup + bench C++ loop.
     // Same input arrays as startAudioInfer; returns timing via logcat only.
@@ -103,6 +107,8 @@ class BertVITS2JNI : IBertVITS2JNI {
     external override fun openclAvailable(): Boolean
 
     external override fun setCpuThreads(threads: Int)
+
+    external override fun setOpenclCachePath(cachePath: String)
 
     external override fun bv2RunBenchmark(
         backend: Int,
