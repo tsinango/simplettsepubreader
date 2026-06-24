@@ -17,6 +17,7 @@ import com.example.epubreader.data.ReadingLocatorEntity
 import com.example.epubreader.data.SentenceRef
 import com.example.epubreader.tts.EmbeddedModelRegistry
 import com.example.epubreader.tts.EmbeddedModelSelectionStore
+import com.example.epubreader.tts.PronunciationStore
 import com.example.epubreader.tts.ReaderTtsService
 import com.example.epubreader.tts.TtsModelPackDescriptor
 import com.example.epubreader.tts.TtsPerformanceSnapshot
@@ -86,6 +87,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         EmbeddedModelRegistry.all.associate { it.id to VitsModelManager(application, it) }
     private val ttsPerformanceStore = TtsPerformanceStore(application)
     val embeddedSelectionStore = EmbeddedModelSelectionStore(application)
+    val pronunciationStore = PronunciationStore(application)
 
     val settings = repository.settings.stateIn(
         viewModelScope,
@@ -459,6 +461,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setEmbeddedRate(id: VitsModelId, rate: Float) {
         embeddedSelectionStore.setRate(id.stableValue, rate.coerceIn(0.5f, 2f))
+        if (_readerPosition.value.isSpeaking) sendAction(ReaderTtsService.ACTION_SETTINGS_CHANGED)
+    }
+
+    fun previewEmbeddedVoice(id: VitsModelId, sid: Int) {
+        val intent = Intent(getApplication(), ReaderTtsService::class.java).apply {
+            action = ReaderTtsService.ACTION_PREVIEW
+            putExtra(ReaderTtsService.EXTRA_MODEL_ID, id.stableValue)
+            putExtra(ReaderTtsService.EXTRA_SPEAKER_ID, sid)
+        }
+        getApplication<Application>().startForegroundService(intent)
+    }
+
+    fun savePronunciationRules(value: String) {
+        pronunciationStore.saveEditableText(value)
         if (_readerPosition.value.isSpeaking) sendAction(ReaderTtsService.ACTION_SETTINGS_CHANGED)
     }
 

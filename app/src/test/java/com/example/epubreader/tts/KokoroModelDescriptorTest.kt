@@ -136,4 +136,14 @@ class KokoroModelDescriptorTest {
         assertEquals(58, KokoroModelRegistry.DEFAULT_CHINESE_MALE_SID)
         assertNotNull(VitsModelId.fromStableValue(VitsModelId.KOKORO_MULTI_ZH.stableValue))
     }
+
+    @Test
+    fun int8PackUsesIndependentPinnedGraphAndStorage() {
+        val pack = KokoroModelRegistry.kokoroMultiLangV1_1Int8
+        assertEquals(VitsModelId.KOKORO_MULTI_ZH_INT8, pack.id)
+        assertEquals("model.int8.onnx", pack.modelFileName)
+        assertTrue(pack.totalSizeBytes < KokoroModelRegistry.kokoroMultiLangV1_1.totalSizeBytes)
+        assertEquals(114_299_010L, pack.specs.first { it.name == "model.int8.onnx" }.size)
+        assertFalse(pack.specs.any { it.name == "model.onnx" })
+    }
 }

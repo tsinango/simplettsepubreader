@@ -38,12 +38,16 @@ class EmbeddedPlaybackPipeline(
     private var currentEncoding = AudioFormat.ENCODING_PCM_FLOAT
     @Volatile private var serial = 0
     private var floatSupported = true
+    @Volatile private var targetBufferMs = 2_500L
     private val pendingSentenceEnds = ArrayDeque<Pair<String, Long>>()
 
     var onSentenceComplete: (suspend (sentenceKey: String) -> Unit)? = null
     var onAllPlaybackComplete: (suspend () -> Unit)? = null
     var onFallbackToPcm16: (suspend () -> Unit)? = null
     var onFallbackToSystem: (suspend (String) -> Unit)? = null
+    var onFirstAudioWritten: (() -> Unit)? = null
+    var onPrefetchSample: ((hit: Boolean) -> Unit)? = null
+    var onPlaybackGap: ((gapMs: Long) -> Unit)? = null
 
     val currentSerial: Int get() = serial
     val totalEnqueued: Long get() = totalFramesEnqueued
@@ -57,6 +61,10 @@ class EmbeddedPlaybackPipeline(
         floatSupported = value
     }
 
+    fun setTargetBufferMs(value: Long) {
+        targetBufferMs = value.coerceIn(500L, 10_000L)
+    }
+
     fun startPlayback(initialSerial: Int): Channel<QueuedAudio> {
         stopPlayback()
         serial = initialSerial
@@ -65,7 +73,7 @@ class EmbeddedPlaybackPipeline(
         pendingSentenceEnds.clear()
         currentSampleRate = 0
         currentEncoding = if (floatSupported) AudioFormat.ENCODING_PCM_FLOAT else AudioFormat.ENCODING_PCM_16BIT
-        val ch = Channel<QueuedAudio>(capacity = 2)
+        val ch = Channel<QueuedAudio>(capacity = 8)
         channel = ch
         startConsumer(initialSerial)
         return ch
@@ -79,6 +87,10 @@ class EmbeddedPlaybackPipeline(
         isSentenceEnd: Boolean,
     ) {
         val ch = channel ?: return
+        if (!isCurrentSerial(s)) return
+        while (isCurrentSerial(s) && bufferedDurationMs(sampleRate) >= targetBufferMs) {
+            delay(pollIntervalMs)
+        }
         if (!isCurrentSerial(s)) return
         totalFramesEnqueued += samples.size
         val cumulativeEnd = totalFramesEnqueued
@@ -116,13 +128,27 @@ class EmbeddedPlaybackPipeline(
 
     fun isCurrentSerial(s: Int): Boolean = s == serial
 
+    fun bufferedDurationMs(sampleRate: Int = currentSampleRate): Long {
+        if (sampleRate <= 0) return 0
+        val played = readPlayedFrames() ?: 0L
+        return ((totalFramesEnqueued - played).coerceAtLeast(0L) * 1000L) / sampleRate
+    }
+
     private fun startConsumer(s: Int) {
         playbackJob = scope.launch(dispatcher) {
             val ch = channel ?: return@launch
+            var receivedAny = false
             try {
                 while (isCurrentSerial(s)) {
+                    val waitStarted = monotonicMillis()
                     val entry = ch.receiveCatching().getOrNull() ?: break
+                    val waitedMs = (monotonicMillis() - waitStarted).coerceAtLeast(0)
                     if (entry.serial != s || !isCurrentSerial(s)) continue
+                    if (receivedAny) {
+                        val buffered = (readPlayedFrames() ?: 0L) < totalFramesWritten
+                        onPrefetchSample?.invoke(buffered)
+                        if (!buffered && waitedMs > pollIntervalMs) onPlaybackGap?.invoke(waitedMs)
+                    }
                     if (!ensureSink(entry.sampleRate, s)) return@launch
                     val written = writeSamples(entry, s)
                     if (written < 0) {
@@ -130,7 +156,9 @@ class EmbeddedPlaybackPipeline(
                         return@launch
                     }
                     if (written > 0) {
+                        if (!receivedAny) onFirstAudioWritten?.invoke()
                         totalFramesWritten += written
+                        receivedAny = true
                     }
                     if (entry.isSentenceEnd) {
                         pendingSentenceEnds.addLast(entry.sentenceKey to entry.cumulativeEndFrame)
@@ -254,13 +282,13 @@ class EmbeddedPlaybackPipeline(
     private fun writePcm16Loop(sinkObj: AudioSink, samples: FloatArray, s: Int): Int {
         var offset = 0
         var consecutiveZero = 0
+        val reusable = ShortArray(minOf(streamWriteFrames, samples.size))
         while (offset < samples.size && isCurrentSerial(s)) {
             val chunkSize = minOf(streamWriteFrames, samples.size - offset)
-            val buf = ShortArray(chunkSize)
             for (i in 0 until chunkSize) {
-                buf[i] = (samples[offset + i].coerceIn(-1f, 1f) * Short.MAX_VALUE).toInt().toShort()
+                reusable[i] = (samples[offset + i].coerceIn(-1f, 1f) * Short.MAX_VALUE).toInt().toShort()
             }
-            val written = sinkObj.write(buf, 0, chunkSize, AudioTrack.WRITE_BLOCKING)
+            val written = sinkObj.write(reusable, 0, chunkSize, AudioTrack.WRITE_BLOCKING)
             if (written < 0) {
                 DiagnosticLogger.event(
                     "AUDIO_TRACK",
@@ -342,6 +370,8 @@ class EmbeddedPlaybackPipeline(
         val s = sink ?: return null
         return s.playbackHeadPosition.toLong() and 0xffffffffL
     }
+
+    private fun monotonicMillis(): Long = System.nanoTime() / 1_000_000L
 
     companion object {
         private const val MAX_CONSECUTIVE_ZERO = 5

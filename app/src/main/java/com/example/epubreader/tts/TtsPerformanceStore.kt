@@ -25,13 +25,15 @@ class TtsPerformanceStore(context: Context) {
 
     fun snapshot(modelRevision: String, modelId: String): TtsPerformanceSnapshot = TtsPerformanceSnapshot(
         modelId = modelId,
-        cpuThreads = cpuThreads(),
+        cpuThreads = preferences.getInt(metricKey(KEY_MODEL_THREADS, modelRevision), cpuThreads()),
         engineInitMillis = preferences.getLong(metricKey(KEY_ENGINE_INIT_MS, modelRevision), 0),
         firstAudioMillis = preferences.getLong(metricKey(KEY_FIRST_AUDIO_MS, modelRevision), 0),
         generationMillis = preferences.getLong(metricKey(KEY_GENERATION_MS, modelRevision), 0),
         realTimeFactor = preferences.getFloat(metricKey(KEY_RTF, modelRevision), 0f),
         prefetchHitRate = preferences.getFloat(metricKey(KEY_PREFETCH_HIT_RATE, modelRevision), 0f),
         gapMillis = preferences.getLong(metricKey(KEY_GAP_MS, modelRevision), 0),
+        generationP95Millis = percentile(history(KEY_GENERATION_HISTORY, modelRevision), 0.95f).toLong(),
+        realTimeFactorP95 = percentile(history(KEY_RTF_HISTORY, modelRevision), 0.95f),
     )
 
     fun saveMetrics(
@@ -42,10 +44,11 @@ class TtsPerformanceStore(context: Context) {
         realTimeFactor: Float,
         prefetchHitRate: Float,
         gapMillis: Long,
+        activeCpuThreads: Int = cpuThreads(),
     ) {
         preferences.edit()
             .putString(KEY_PROFILE, deviceProfile)
-            .putInt(KEY_CPU_THREADS, cpuThreads())
+            .putInt(KEY_CPU_THREADS, activeCpuThreads)
             .putLong(metricKey(KEY_ENGINE_INIT_MS, modelRevision), engineInitMillis)
             .putLong(metricKey(KEY_FIRST_AUDIO_MS, modelRevision), firstAudioMillis)
             .putLong(metricKey(KEY_GENERATION_MS, modelRevision), generationMillis)
@@ -53,6 +56,47 @@ class TtsPerformanceStore(context: Context) {
             .putFloat(metricKey(KEY_PREFETCH_HIT_RATE, modelRevision), prefetchHitRate)
             .putLong(metricKey(KEY_GAP_MS, modelRevision), gapMillis)
             .apply()
+    }
+
+    fun recordGeneration(modelRevision: String, generationMillis: Long, realTimeFactor: Float) {
+        val generationHistory = appendHistory(KEY_GENERATION_HISTORY, modelRevision, generationMillis.toFloat())
+        val rtfHistory = appendHistory(KEY_RTF_HISTORY, modelRevision, realTimeFactor)
+        preferences.edit()
+            .putString(metricKey(KEY_GENERATION_HISTORY, modelRevision), generationHistory)
+            .putString(metricKey(KEY_RTF_HISTORY, modelRevision), rtfHistory)
+            .apply()
+    }
+
+    fun recommendedThreads(modelRevision: String, thermalCap: Int): Int =
+        preferences.getInt(metricKey(KEY_MODEL_THREADS, modelRevision), thermalCap)
+            .coerceIn(MIN_CPU_THREADS, thermalCap.coerceAtLeast(MIN_CPU_THREADS))
+
+    fun updateThreadRecommendation(modelRevision: String, currentThreads: Int) {
+        val values = history(KEY_RTF_HISTORY, modelRevision).takeLast(20)
+        if (values.size < 10) return
+        val p95 = percentile(values, 0.95f)
+        val next = when {
+            p95 < 0.55f -> currentThreads - 1
+            p95 > 0.8f -> currentThreads + 1
+            else -> currentThreads
+        }.coerceIn(MIN_CPU_THREADS, MAX_CPU_THREADS)
+        preferences.edit().putInt(metricKey(KEY_MODEL_THREADS, modelRevision), next).apply()
+    }
+
+    private fun history(base: String, revision: String): List<Float> =
+        preferences.getString(metricKey(base, revision), null)
+            ?.split(',')
+            ?.mapNotNull(String::toFloatOrNull)
+            .orEmpty()
+
+    private fun appendHistory(base: String, revision: String, value: Float): String =
+        (history(base, revision) + value).takeLast(MAX_HISTORY).joinToString(",")
+
+    private fun percentile(values: List<Float>, percentile: Float): Float {
+        if (values.isEmpty()) return 0f
+        val sorted = values.sorted()
+        val index = ((sorted.lastIndex) * percentile).toInt().coerceIn(sorted.indices)
+        return sorted[index]
     }
 
     private fun metricKey(base: String, revision: String) = "$base:$revision"
@@ -105,6 +149,10 @@ class TtsPerformanceStore(context: Context) {
         private const val KEY_RTF = "rtf"
         private const val KEY_PREFETCH_HIT_RATE = "prefetch_hit_rate"
         private const val KEY_GAP_MS = "gap_ms"
+        private const val KEY_GENERATION_HISTORY = "generation_history"
+        private const val KEY_RTF_HISTORY = "rtf_history"
+        private const val KEY_MODEL_THREADS = "model_threads"
+        private const val MAX_HISTORY = 50
         private const val MIN_CPU_THREADS = TtsThreadPolicy.MIN_THREADS
         private const val MAX_CPU_THREADS = TtsThreadPolicy.MAX_THREADS
     }

@@ -55,6 +55,7 @@ data class KokoroModelDescriptor(
     override val sampleRate: Int,
     override val speakerMetadata: List<SpeakerEntry>?,
     override val specs: List<ModelFileSpec>,
+    val modelFileName: String = "model.onnx",
 ) : TtsModelPackDescriptor {
     override fun assetUrl(spec: ModelFileSpec): String =
         "https://huggingface.co/$huggingFaceRepo/resolve/$revision/${spec.name}"
@@ -471,6 +472,36 @@ object KokoroModelRegistry {
         ),
     )
 
+    /** Official quantized sibling. Assets other than the ONNX graph are byte-identical. */
+    val kokoroMultiLangV1_1Int8: KokoroModelDescriptor by lazy {
+        val int8Model = ModelFileSpec(
+            name = "model.int8.onnx",
+            size = 114_299_010L,
+            sha256 = "bda15858163726a492d02a9a727bc263551b86ac77f90812c4b30ff41d380e26",
+        )
+        val specs = kokoroMultiLangV1_1.specs.map {
+            if (it.name == "model.onnx") int8Model else it
+        }
+        KokoroModelDescriptor(
+            id = VitsModelId.KOKORO_MULTI_ZH_INT8,
+            engineKind = TtsEngineKind.SHERPA_KOKORO,
+            displayName = VitsModelId.KOKORO_MULTI_ZH_INT8.displayName,
+            sizeLabel = "约 192 MB",
+            totalSizeBytes = specs.sumOf { it.size },
+            dirName = "models/kokoro-int8-multi-lang-v1_1",
+            revision = "155831f1b4ba23b1f5c058be6a61df90cefb2a37",
+            huggingFaceRepo = "csukuangfj/kokoro-int8-multi-lang-v1_1",
+            readyMarkerName = ".ready-155831f-v1",
+            workName = "download-kokoro-int8-multi-lang-v1_1",
+            description = "Kokoro-82M 中文 INT8，24 kHz / 103 说话人；体积更小，适合移动端。Apache-2.0。",
+            license = "Apache-2.0",
+            sampleRate = 24_000,
+            speakerMetadata = kokoroSpeakerManifest(),
+            specs = specs,
+            modelFileName = "model.int8.onnx",
+        )
+    }
+
     /**
      * Returns the official Kokoro v1.1-zh 103-speaker manifest as documented in
      * https://github.com/k2-fsa/sherpa-onnx/pull/1942:
@@ -481,25 +512,34 @@ object KokoroModelRegistry {
      *   3..57  (55)    Chinese female (zf_NNN); name pattern confirmed by PR sample id=3 `zf_001`.
      *   58..102 (45)   Chinese male  (zm_NNN); pattern follows the same convention.
      *
-     * For ids beyond the three named in the PR (`af_maple`, `af_sol`, `bf_vale`)
-     * we cannot verify individual voice names from the primary source, so the
-     * per-id label uses the canonical prefix + zero-padded index of the id
-     * inside its language/gender block (`zf_001` for id=3 etc.). The genders
-     * themselves — which is the information the UI relies on for the default
-     * female / male test entries — are taken verbatim from PR #1942's table,
-     * never guessed.
+     * Names and ids match the speaker metadata embedded in the upstream ONNX
+     * graph; unlike a sequential synthetic label, gaps such as zf_008 ->
+     * zf_017 are preserved so the picker identifies the voice actually sent
+     * to sherpa-onnx.
      */
     fun kokoroSpeakerManifest(): List<SpeakerEntry> = buildList {
         add(SpeakerEntry(0, "af_maple", "EN", SpeakerGender.FEMALE))
         add(SpeakerEntry(1, "af_sol", "EN", SpeakerGender.FEMALE))
         add(SpeakerEntry(2, "bf_vale", "EN", SpeakerGender.FEMALE))
-        for (sid in 3..57) {
-            val n = (sid - 2).toString().padStart(3, '0')
-            add(SpeakerEntry(sid, "zf_$n", "ZH", SpeakerGender.FEMALE))
+        val femaleNames = listOf(
+            "001", "002", "003", "004", "005", "006", "007", "008", "017", "018", "019",
+            "021", "022", "023", "024", "026", "027", "028", "032", "036", "038", "039",
+            "040", "042", "043", "044", "046", "047", "048", "049", "051", "059", "060",
+            "067", "070", "071", "072", "073", "074", "075", "076", "077", "078", "079",
+            "083", "084", "085", "086", "087", "088", "090", "092", "093", "094", "099",
+        )
+        val maleNames = listOf(
+            "009", "010", "011", "012", "013", "014", "015", "016", "020", "025", "029",
+            "030", "031", "033", "034", "035", "037", "041", "045", "050", "052", "053",
+            "054", "055", "056", "057", "058", "061", "062", "063", "064", "065", "066",
+            "068", "069", "080", "081", "082", "089", "091", "095", "096", "097", "098",
+            "100",
+        )
+        femaleNames.forEachIndexed { index, name ->
+            add(SpeakerEntry(index + 3, "zf_$name", "ZH", SpeakerGender.FEMALE))
         }
-        for (sid in 58..102) {
-            val n = (sid - 57).toString().padStart(3, '0')
-            add(SpeakerEntry(sid, "zm_$n", "ZH", SpeakerGender.MALE))
+        maleNames.forEachIndexed { index, name ->
+            add(SpeakerEntry(index + 58, "zm_$name", "ZH", SpeakerGender.MALE))
         }
     }
 }

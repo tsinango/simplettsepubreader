@@ -138,4 +138,18 @@ class TtsPerformanceStoreTest {
         assertTrue(perf.modelId == VitsModelRegistry.WNJ.id.stableValue)
         assertTrue(perf.modelId != VitsModelRegistry.MELO.id.stableValue)
     }
+
+    @Test
+    fun generationHistoryProducesP95AndTunesThreadsPerModel() {
+        val store = TtsPerformanceStore(context)
+        repeat(10) { index ->
+            store.recordGeneration(VitsModelRegistry.WNJ.revision, 100L + index, 0.4f + index * 0.005f)
+        }
+        val snapshot = store.snapshot(VitsModelRegistry.WNJ.revision, VitsModelRegistry.WNJ.id.stableValue)
+        assertTrue(snapshot.generationP95Millis >= 107L)
+        assertTrue(snapshot.realTimeFactorP95 >= 0.43f)
+        store.updateThreadRecommendation(VitsModelRegistry.WNJ.revision, 4)
+        assertEquals(3, store.recommendedThreads(VitsModelRegistry.WNJ.revision, 4))
+        assertEquals(3, store.snapshot(VitsModelRegistry.WNJ.revision, VitsModelRegistry.WNJ.id.stableValue).cpuThreads)
+    }
 }

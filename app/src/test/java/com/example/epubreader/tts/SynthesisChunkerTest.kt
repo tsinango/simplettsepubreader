@@ -31,14 +31,12 @@ class SynthesisChunkerTest {
     }
 
     @Test
-    fun strongPunctuationAlwaysSplits() {
+    fun shortClausesStayTogetherForBetterProsody() {
         val text = "你好，今天的天气很好。我们出去走走吧！"
         val chunks = SynthesisChunker.split("key", text)
-        assertEquals(2, chunks.size)
-        assertEquals("你好，今天的天气很好。", chunks[0].text)
-        assertEquals("我们出去走走吧！", chunks[1].text)
-        assertEquals(350, chunks[0].pauseMs)
-        assertEquals(350, chunks[1].pauseMs)
+        assertEquals(1, chunks.size)
+        assertEquals(text, chunks.single().text)
+        assertEquals(350, chunks.single().pauseMs)
         assertEquals(text, chunks.joinToString("") { it.text })
     }
 

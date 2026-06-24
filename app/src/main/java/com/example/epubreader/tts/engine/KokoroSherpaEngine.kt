@@ -58,7 +58,7 @@ class KokoroSherpaEngine(
         check(offlineTts == null) { "KokoroSherpaEngine(${descriptor.id.stableValue}) already initialised" }
         initStartedAt = SystemClock.elapsedRealtime()
         val modelDir = VitsModelManager.modelDir(context, descriptor)
-        val modelPath = File(modelDir, MODEL_ONNX).absolutePath
+        val modelPath = File(modelDir, descriptor.modelFileName).absolutePath
         val voicesPath = File(modelDir, VOICES_BIN).absolutePath
         val tokensPath = File(modelDir, TOKENS_TXT).absolutePath
         val dataDir = File(modelDir, ESPEAK_NG_DATA).absolutePath
@@ -124,7 +124,6 @@ class KokoroSherpaEngine(
     }
 
     private companion object {
-        const val MODEL_ONNX = "model.onnx"
         const val VOICES_BIN = "voices.bin"
         const val TOKENS_TXT = "tokens.txt"
         const val ESPEAK_NG_DATA = "espeak-ng-data"

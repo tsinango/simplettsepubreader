@@ -33,6 +33,7 @@ enum class VitsModelId(val stableValue: String, val displayName: String) {
     FANCHEN_WNJ("FANCHEN_WNJ", "内置 VITS（WNJ）"),
     MELO_TTS_ZH_EN("MELO_TTS_ZH_EN", "MeloTTS 中英双语"),
     KOKORO_MULTI_ZH("KOKORO_MULTI_ZH", "Kokoro-82M 中文"),
+    KOKORO_MULTI_ZH_INT8("KOKORO_MULTI_ZH_INT8", "Kokoro-82M 中文 INT8"),
     BERT_VITS2_MNN_22K("BERT_VITS2_MNN_22K", "Bert-VITS2 MNN (22K 中文)"),
     ;
 

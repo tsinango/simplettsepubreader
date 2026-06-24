@@ -273,13 +273,19 @@ fun ReaderScreen(
             onCancelVitsDownload = vm::cancelVitsDownload,
             onDeleteVitsModel = vm::deleteVitsModel,
             getEmbeddedSpeakerId = { id ->
-                vm.embeddedSelectionStore.speakerId(id.stableValue, 0)
+                val defaultSid = if (id == com.example.epubreader.tts.VitsModelId.KOKORO_MULTI_ZH ||
+                    id == com.example.epubreader.tts.VitsModelId.KOKORO_MULTI_ZH_INT8
+                ) com.example.epubreader.tts.KokoroModelRegistry.DEFAULT_CHINESE_FEMALE_SID else 0
+                vm.embeddedSelectionStore.speakerId(id.stableValue, defaultSid)
             },
             getEmbeddedRate = { id ->
                 vm.embeddedSelectionStore.rate(id.stableValue, 1f)
             },
             onSetEmbeddedSpeakerId = vm::setEmbeddedSpeakerId,
             onSetEmbeddedRate = vm::setEmbeddedRate,
+            onPreviewEmbeddedVoice = vm::previewEmbeddedVoice,
+            pronunciationRules = vm.pronunciationStore.asEditableText(),
+            onSavePronunciationRules = vm::savePronunciationRules,
             onExportDiagnostics = {
                 diagnosticExportMessage = null
                 diagnosticExporter.launch(DiagnosticLogger.defaultExportFileName())

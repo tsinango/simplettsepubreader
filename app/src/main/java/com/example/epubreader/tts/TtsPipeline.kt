@@ -33,7 +33,12 @@ object SynthesisChunker {
         else -> config.defaultMs
     }
 
-    fun split(logicalSentenceKey: String, text: String, config: PauseConfig = PauseConfig()): List<SynthesisChunk> {
+    fun split(
+        logicalSentenceKey: String,
+        text: String,
+        config: PauseConfig = PauseConfig(),
+        maxChars: Int = MAX_CHARS,
+    ): List<SynthesisChunk> {
         val normalized = text.trim()
         if (normalized.isEmpty()) return emptyList()
 
@@ -47,7 +52,10 @@ object SynthesisChunker {
             val charsSinceBreak = i - start
 
             when {
-                ch in strongPunctuation -> {
+                ch in strongPunctuation && (
+                    charsSinceBreak >= MIN_BREAK_CHARS ||
+                        i == len - 1 || (i + 1 == len - 1 && normalized[i + 1] in closingChars)
+                ) -> {
                     val end = if (i + 1 < len && normalized[i + 1] in closingChars) i + 2 else i + 1
                     result.add(SynthesisChunk(logicalSentenceKey, result.size, normalized.substring(start, end), pauseMsFor(ch, config)))
                     start = end
@@ -58,7 +66,7 @@ object SynthesisChunker {
                     start = i + 1
                     i = start
                 }
-                charsSinceBreak >= MAX_CHARS -> {
+                charsSinceBreak >= maxChars -> {
                     val searchStart = start + MIN_BREAK_CHARS
                     val breakPos = if (searchStart < i) findLastPunct(normalized, searchStart, i) else -1
                     if (breakPos >= searchStart) {
@@ -112,4 +120,6 @@ data class TtsPerformanceSnapshot(
     val realTimeFactor: Float = 0f,
     val prefetchHitRate: Float = 0f,
     val gapMillis: Long = 0,
+    val generationP95Millis: Long = 0,
+    val realTimeFactorP95: Float = 0f,
 )

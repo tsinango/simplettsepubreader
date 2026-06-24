@@ -51,6 +51,9 @@ fun SettingsDialog(
     getEmbeddedRate: (VitsModelId) -> Float,
     onSetEmbeddedSpeakerId: (VitsModelId, Int) -> Unit,
     onSetEmbeddedRate: (VitsModelId, Float) -> Unit,
+    onPreviewEmbeddedVoice: (VitsModelId, Int) -> Unit,
+    pronunciationRules: String,
+    onSavePronunciationRules: (String) -> Unit,
     onExportDiagnostics: () -> Unit,
     diagnosticExportMessage: String?,
     onClearDiagnostics: () -> Unit,
@@ -62,6 +65,7 @@ fun SettingsDialog(
     var confirmDownloadModel by remember { mutableStateOf<VitsModelId?>(null) }
     var confirmClearLog by remember { mutableStateOf(false) }
     var kokoroSpeakerPickerForId by remember { mutableStateOf<VitsModelId?>(null) }
+    var pronunciationText by remember(pronunciationRules) { mutableStateOf(pronunciationRules) }
     LaunchedEffect(current.ttsEngine, current.vitsModelId) {
         value = value.copy(ttsEngine = current.ttsEngine, vitsModelId = current.vitsModelId)
     }
@@ -86,6 +90,12 @@ fun SettingsDialog(
                 Slider(value.ideographicCommaPauseMs.toFloat(), { value = value.copy(ideographicCommaPauseMs = it.toInt()) }, valueRange = 10f..1000f, steps = 98)
                 Text("默认停顿：${value.defaultPauseMs}ms")
                 Slider(value.defaultPauseMs.toFloat(), { value = value.copy(defaultPauseMs = it.toInt()) }, valueRange = 10f..1000f, steps = 98)
+                androidx.compose.material3.OutlinedTextField(
+                    value = pronunciationText,
+                    onValueChange = { pronunciationText = it },
+                    label = { Text("发音替换（每行：原文=读法）") },
+                    minLines = 2,
+                )
                 Text(context.getString(R.string.tts_engine_label))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     TextButton(onClick = {
@@ -155,7 +165,11 @@ fun SettingsDialog(
             }
         },
         confirmButton = {
-            Button(onClick = { onChange(value); onClose() }) { Text(context.getString(R.string.save)) }
+            Button(onClick = {
+                onChange(value)
+                onSavePronunciationRules(pronunciationText)
+                onClose()
+            }) { Text(context.getString(R.string.save)) }
         },
         dismissButton = {
             TextButton(onClick = onClose) { Text(context.getString(R.string.cancel)) }
@@ -206,6 +220,7 @@ fun SettingsDialog(
                 onSetEmbeddedSpeakerId(id, sid)
                 kokoroSpeakerPickerForId = null
             },
+            onPreview = { sid -> onPreviewEmbeddedVoice(id, sid) },
             onDismiss = { kokoroSpeakerPickerForId = null },
         )
     }
@@ -273,8 +288,13 @@ private fun EmbeddedModelSection(
                 Text(
                     "当前：CPU / ${performance.cpuThreads} 线程" +
                         if (performance.realTimeFactor > 0f) {
-                            "，RTF ${"%.2f".format(performance.realTimeFactor)}，预取 ${"%.0f".format(performance.prefetchHitRate * 100)}%" +
-                                "，首音频 ${performance.firstAudioMillis} ms"
+                            "，RTF ${"%.2f".format(performance.realTimeFactor)}" +
+                                (if (performance.realTimeFactorP95 > 0f) {
+                                    "（P95 ${"%.2f".format(performance.realTimeFactorP95)}）"
+                                } else "") +
+                                "，预取 ${"%.0f".format(performance.prefetchHitRate * 100)}%" +
+                                "，首音频 ${performance.firstAudioMillis} ms" +
+                                (if (performance.gapMillis > 0) "，最大断流 ${performance.gapMillis} ms" else "")
                         } else "",
                 )
             }
@@ -315,32 +335,46 @@ private fun KokoroSpeakerPicker(
     speakers: List<SpeakerEntry>,
     currentSid: Int,
     onPick: (Int) -> Unit,
+    onPreview: (Int) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    var query by remember { mutableStateOf("") }
+    val filtered = speakers.filter { query.isBlank() || it.name.contains(query, ignoreCase = true) || it.id.toString() == query }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("选择中文说话人") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
+                androidx.compose.material3.OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    label = { Text("按名称或编号筛选") },
+                )
                 Column {
-                    Text("女声（${speakers.count { it.gender == SpeakerGender.FEMALE }}）", fontWeight = FontWeight.Bold)
-                    speakers.filter { it.gender == SpeakerGender.FEMALE }.forEach { s ->
+                    Text("女声（${filtered.count { it.gender == SpeakerGender.FEMALE }}）", fontWeight = FontWeight.Bold)
+                    filtered.filter { it.gender == SpeakerGender.FEMALE }.forEach { s ->
+                        Row {
                         TextButton(onClick = { onPick(s.id) }) {
                             Text(
                                 if (s.id == currentSid) "✓ ${s.id}: ${s.name}"
                                 else "${s.id}: ${s.name}",
                             )
                         }
+                        TextButton(onClick = { onPreview(s.id) }) { Text("试听") }
+                        }
                     }
                 }
                 Column {
-                    Text("男声（${speakers.count { it.gender == SpeakerGender.MALE }}）", fontWeight = FontWeight.Bold)
-                    speakers.filter { it.gender == SpeakerGender.MALE }.forEach { s ->
+                    Text("男声（${filtered.count { it.gender == SpeakerGender.MALE }}）", fontWeight = FontWeight.Bold)
+                    filtered.filter { it.gender == SpeakerGender.MALE }.forEach { s ->
+                        Row {
                         TextButton(onClick = { onPick(s.id) }) {
                             Text(
                                 if (s.id == currentSid) "✓ ${s.id}: ${s.name}"
                                 else "${s.id}: ${s.name}",
                             )
+                        }
+                        TextButton(onClick = { onPreview(s.id) }) { Text("试听") }
                         }
                     }
                 }
